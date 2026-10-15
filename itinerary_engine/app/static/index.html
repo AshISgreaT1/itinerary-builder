@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Itinerary Planner</title>
+<style>
+  :root {
+    --bg: #f6f7fb; --panel: #ffffff; --ink: #16181d; --muted: #6b7280; --line: #e5e7eb;
+    --brand: #1f6feb; --brand-ink: #0b3d91; --accent: #0ea5a4;
+    --ok: #15803d; --ok-bg: #e7f6ec; --warn: #a15c00; --warn-bg: #fdf3e2; --bad: #b42318; --bad-bg: #fdecea;
+    --sight: #1f6feb; --buffer: #9ca3af; --travel: #f59e0b; --free: #e5e7eb;
+    --radius: 14px; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 8px 24px rgba(16,24,40,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #161a21; --ink: #e8eaed; --muted: #9aa3b2; --line: #262c36;
+      --brand: #5b9bff; --brand-ink: #cfe0ff; --ok: #6ee7a8; --ok-bg: #0f2b1d; --warn: #fbbf24;
+      --warn-bg: #2a2110; --bad: #fca5a5; --bad-bg: #2b1414; --free: #262c36; --buffer: #4b5563;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 24px 16px 64px; }
+  header.hero {
+    background: linear-gradient(135deg, var(--brand) 0%, var(--accent) 100%);
+    color: #fff; border-radius: 20px; padding: 26px 26px 22px; box-shadow: var(--shadow);
+  }
+  header.hero h1 { margin: 0 0 4px; font-size: 25px; letter-spacing: -.02em; }
+  header.hero p { margin: 0; opacity: .92; font-size: 14px; }
+
+  form.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: var(--shadow); padding: 18px; margin-top: -18px; position: relative; z-index: 2;
+    margin-left: 10px; margin-right: 10px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  label { display: block; font-size: 12px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .04em; color: var(--muted); margin-bottom: 5px; }
+  input, select { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--bg); color: var(--ink); font: inherit; }
+  input:focus, select:focus { outline: 2px solid var(--brand); outline-offset: 1px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip { border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 999px;
+    padding: 5px 11px; font-size: 13px; cursor: pointer; }
+  .chip[aria-pressed="true"] { background: var(--brand); border-color: var(--brand); color: #fff; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+  button.primary { background: var(--brand); color: #fff; border: 0; border-radius: 10px; padding: 11px 20px;
+    font-weight: 650; font-size: 15px; cursor: pointer; }
+  button.primary:disabled { opacity: .6; cursor: progress; }
+  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--ink);
+    border-radius: 10px; padding: 10px 14px; cursor: pointer; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; margin-top: 18px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 13px 15px; }
+  .stat b { display: block; font-size: 21px; letter-spacing: -.02em; }
+  .stat span { font-size: 12px; color: var(--muted); }
+
+  .banner { margin-top: 18px; border-radius: var(--radius); padding: 14px 16px; border: 1px solid transparent; }
+  .banner h3 { margin: 0 0 6px; font-size: 15px; }
+  .banner.ok { background: var(--ok-bg); border-color: var(--ok); color: var(--ok); }
+  .banner.bad { background: var(--bad-bg); border-color: var(--bad); color: var(--bad); }
+  .banner ul { margin: 8px 0 0; padding-left: 18px; color: var(--ink); }
+  .banner li { margin-bottom: 6px; }
+  .fix { color: var(--muted); font-size: 13px; }
+  details.sub { margin-top: 10px; }
+  details.sub summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+
+  .route { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .leg { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    border-radius: 10px; padding: 8px 12px; font-size: 13px; }
+  .leg.gap { border-left-color: var(--bad); }
+  .leg b { font-weight: 650; }
+
+  .day { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    box-shadow: var(--shadow); margin-top: 16px; overflow: hidden; }
+  .day > header { display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+    padding: 14px 18px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .day h2 { margin: 0; font-size: 17px; letter-spacing: -.01em; }
+  .day .where { color: var(--muted); font-size: 13px; }
+  .bar { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--free); margin: 0 18px; }
+  .bar i { display: block; height: 100%; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; padding: 8px 18px 0; font-size: 12px; color: var(--muted); }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 5px; }
+  ol.sights { list-style: none; margin: 10px 0 0; padding: 0 18px 16px; }
+  ol.sights li { display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+  ol.sights li:first-child { border-top: 0; }
+  .num { flex: 0 0 26px; height: 26px; border-radius: 50%; background: var(--bg); border: 1px solid var(--line);
+    display: grid; place-items: center; font-size: 12px; color: var(--muted); font-weight: 650; }
+  .sight-name { font-weight: 620; }
+  .tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  .tag { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: var(--bg);
+    border: 1px solid var(--line); color: var(--muted); }
+  .tag.must { color: var(--brand-ink); border-color: var(--brand); }
+  .tag.trip { color: var(--warn); border-color: var(--warn); }
+  .desc { color: var(--muted); font-size: 13.5px; margin-top: 6px; }
+  .notes { margin: 0; padding: 10px 18px 14px; color: var(--muted); font-size: 13px; }
+  .notes li { margin-bottom: 3px; }
+  .empty { padding: 14px 18px 18px; color: var(--muted); font-size: 14px; }
+  .missed { margin-top: 18px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 14px 18px; }
+  .missed h3 { margin: 0 0 8px; font-size: 15px; }
+  .missed li { margin-bottom: 6px; font-size: 13.5px; }
+  .err { color: var(--bad); margin-top: 16px; }
+  .sight-actions { margin-left: auto; display: flex; gap: 6px; align-items: flex-start; }
+  .mini { font-size: 12px; padding: 4px 9px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--muted); cursor: pointer; }
+  .mini:hover { color: var(--ink); border-color: var(--brand); }
+  .add-panel { margin-top: 18px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; }
+  .add-panel h3 { margin: 0 0 4px; font-size: 16px; }
+  .add-panel .sub { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+  .addable { display: flex; gap: 10px; align-items: flex-start; padding: 10px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+  .addable .grow { flex: 1 1 260px; }
+  .addable .why { color: var(--muted); font-size: 12.5px; margin-top: 3px; }
+  .daypick { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; flex-basis: 100%; }
+  .daypick button { font-size: 12px; padding: 5px 10px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+  .daypick button.fit { border-color: var(--ok); color: var(--ok); }
+  .daypick button.swap { border-color: var(--warn); color: var(--warn); }
+  .daypick button.no { opacity: .55; cursor: not-allowed; }
+  .changes { margin-top: 16px; border-radius: var(--radius); padding: 12px 16px; background: var(--panel);
+    border: 1px solid var(--line); }
+  .changes li { margin-bottom: 6px; font-size: 13.5px; }
+  .changes .no { color: var(--bad); }
+  .changes .yes { color: var(--ok); }
+  footer { margin-top: 28px; color: var(--muted); font-size: 12px; text-align: center; }
+  @media print {
+    form.card, .row, button { display: none !important; }
+    body { background: #fff; } .day, .stat { box-shadow: none; break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <h1>Itinerary Planner</h1>
+    <p>Day-by-day sight sequences built from the dataset — time-bounded, spatially clustered, feasibility-checked.</p>
+  </header>
+
+  <form class="card" id="form">
+    <div class="grid">
+      <div>
+        <label for="city-search">Cities (in travel order)</label>
+        <input id="city-search" type="search" placeholder="Search cities…" autocomplete="off" />
+      </div>
+      <div>
+        <label for="days">Days</label>
+        <input id="days" type="number" min="1" max="30" value="4" />
+      </div>
+      <div>
+        <label for="pace">Pace</label>
+        <select id="pace">
+          <option value="relaxed">Relaxed — 5h/day</option>
+          <option value="moderate" selected>Moderate — 7h/day</option>
+          <option value="active">Active — 9h/day</option>
+        </select>
+      </div>
+      <div>
+        <label for="origin">Travelling from (optional)</label>
+        <select id="origin"><option value="">— already there —</option></select>
+      </div>
+      <div>
+        <label for="month">Travel month</label>
+        <select id="month"><option value="">— any —</option></select>
+      </div>
+    </div>
+    <div class="chips" id="selected" aria-label="Selected cities"></div>
+    <div class="chips" id="suggestions"></div>
+    <div class="row">
+      <button class="primary" id="go" type="submit">Generate itinerary</button>
+      <button class="ghost" id="print" type="button">Print</button>
+      <span class="fix" id="status"></span>
+    </div>
+  </form>
+
+  <div id="out"></div>
+  <footer>Deterministic engine · no pricing, flights or hotel selection · distances from the dataset's coordinates</footer>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+let cities = [], chosen = [], lastRequest = null, lastPlan = null, edits = [];
+
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const hours = (value) => `${(Math.round(value * 10) / 10).toFixed(1)}h`;
+
+async function loadCities() {
+  // Destinations must have sightseeing rows; an origin only needs to exist (e.g. Delhi).
+  const [withSights, everyCity] = await Promise.all([
+    fetch("/cities").then((r) => r.json()),
+    fetch("/cities?with_sights_only=false").then((r) => r.json()),
+  ]);
+  cities = withSights.cities;
+  $("origin").insertAdjacentHTML("beforeend",
+    everyCity.cities.map((c) => `<option value="${esc(c.city)}">${esc(c.city)}${c.sights ? "" : " (no sights)"}</option>`).join(""));
+  MONTHS.forEach((name, index) =>
+    $("month").insertAdjacentHTML("beforeend", `<option value="${index + 1}">${name}</option>`));
+  renderSuggestions("");
+}
+
+function renderSuggestions(query) {
+  const needle = query.trim().toLowerCase();
+  const matches = cities
+    .filter((c) => !chosen.includes(c.city) && (!needle || c.city.toLowerCase().includes(needle)))
+    .slice(0, needle ? 8 : 6);
+  $("suggestions").innerHTML = matches
+    .map((c) => `<button type="button" class="chip" data-add="${esc(c.city)}">+ ${esc(c.city)} <span style="opacity:.6">${c.sights}</span></button>`)
+    .join("");
+}
+
+function renderChosen() {
+  $("selected").innerHTML = chosen
+    .map((city, index) => `<button type="button" class="chip" aria-pressed="true" data-remove="${esc(city)}">${index + 1}. ${esc(city)} ✕</button>`)
+    .join("");
+}
+
+document.addEventListener("click", (event) => {
+  const add = event.target.closest("[data-add]"), remove = event.target.closest("[data-remove]");
+  if (add) { chosen.push(add.dataset.add); renderChosen(); renderSuggestions($("city-search").value); }
+  if (remove) { chosen = chosen.filter((c) => c !== remove.dataset.remove); renderChosen(); renderSuggestions($("city-search").value); }
+});
+$("city-search").addEventListener("input", (event) => renderSuggestions(event.target.value));
+$("print").addEventListener("click", () => window.print());
+
+$("form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!chosen.length) { $("status").textContent = "Pick at least one city."; return; }
+  $("go").disabled = true; $("status").textContent = "Planning…";
+  const body = {
+    cities: chosen,
+    duration_days: Number($("days").value),
+    pace: $("pace").value,
+    origin_city: $("origin").value || null,
+    start_month: $("month").value ? Number($("month").value) : null,
+  };
+  lastRequest = body; edits = [];
+  try {
+    const response = await fetch("/generate-itinerary", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      $("out").innerHTML = `<p class="err">${esc(payload.detail || "Could not plan this trip.")}</p>`;
+    } else {
+      render(payload);
+    }
+  } catch (error) {
+    $("out").innerHTML = `<p class="err">${esc(error.message)}</p>`;
+  } finally {
+    $("go").disabled = false; $("status").textContent = "";
+  }
+});
+
+function validationBanner(validation) {
+  const criticals = validation.entries.filter((e) => e.severity === "critical");
+  const warnings = validation.entries.filter((e) => e.severity === "warning");
+  const notes = validation.notes || [];
+  const head = validation.passed
+    ? `<div class="banner ok"><h3>✓ Feasible — every critical check passed</h3>`
+    : `<div class="banner bad"><h3>✕ Not feasible — ${criticals.length} blocking issue${criticals.length > 1 ? "s" : ""}</h3>`;
+  const list = criticals.length
+    ? `<ul>${criticals.map((e) => {
+        const prefix = (e.day && !/^Day\s/i.test(e.message)) ? `<b>Day ${e.day}:</b> ` : "";
+        return `<li>${prefix}${esc(e.message)}<div class="fix">Fix: ${esc(e.fix)}</div></li>`;
+      }).join("")}</ul>`
+    : "";
+  const extra = (warnings.length || notes.length)
+    ? `<details class="sub"><summary>${warnings.length} warning(s), ${notes.length} note(s)</summary><ul>` +
+      warnings.map((e) => `<li>⚠ ${esc(e.message)}${e.fix ? `<div class="fix">${esc(e.fix)}</div>` : ""}</li>`).join("") +
+      notes.map((n) => `<li>· ${esc(n)}</li>`).join("") + `</ul></details>`
+    : "";
+  return head + list + extra + `</div>`;
+}
+
+function dayCard(day) {
+  const budget = day.time_budget || {};
+  const allowance = Math.max(budget.pace_allowance || 0, day.used_hours + (budget.intercity_travel_hours || 0));
+  const part = (value) => `${Math.max(0, (value / (allowance || 1)) * 100)}%`;
+  const travel = (budget.intercity_travel_hours || 0) + (budget.day_overhead_hours || 0);
+  const bar = `<div class="bar">
+      <i style="width:${part(day.sightseeing_hours)};background:var(--sight)"></i>
+      <i style="width:${part(day.buffer_hours)};background:var(--buffer)"></i>
+      <i style="width:${part(day.local_travel_hours + travel)};background:var(--travel)"></i>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--sight)"></i>sightseeing ${hours(day.sightseeing_hours)}</span>
+      <span><i style="background:var(--buffer)"></i>stop buffers ${hours(day.buffer_hours)}</span>
+      <span><i style="background:var(--travel)"></i>travel &amp; overheads ${hours(day.local_travel_hours + travel)}</span>
+      <span><i style="background:var(--free)"></i>free ${hours(Math.max(0, day.available_hours - day.used_hours))}</span>
+    </div>`;
+
+  const sights = day.sights.length
+    ? `<ol class="sights">${day.sights.map((sight, index) => `
+        <li>
+          <div class="num">${index + 1}</div>
+          <div>
+            <div class="sight-name">${esc(sight.sight)}</div>
+            <div class="tags">
+              <span class="tag">${hours(sight.duration_hours)}</span>
+              <span class="tag">${esc(sight.best_time)}</span>
+              ${sight.visit_type ? `<span class="tag">${esc(sight.visit_type)}</span>` : ""}
+              ${sight.must_visit ? `<span class="tag must">★ must visit</span>` : ""}
+              ${sight.is_excursion ? `<span class="tag trip">day trip · ${sight.distance_from_centre_km} km</span>` : ""}
+            </div>
+            ${sight.description ? `<div class="desc">${esc(sight.description)}</div>` : ""}
+          </div>
+          <div class="sight-actions">
+            <button class="mini" data-swap="${esc(sight.sight)}" data-city="${esc(day.city)}" data-day="${day.day}">Replace</button>
+            <button class="mini" data-drop="${esc(sight.sight)}" data-city="${esc(day.city)}">Remove</button>
+          </div>
+        </li>`).join("")}</ol>`
+    : `<p class="empty">No sightseeing on this day — ${esc((day.notes || [])[0] || "the day is taken by travel.")}</p>`;
+
+  const where = day.transfer
+    ? `${esc(day.transfer.from_city)} → ${esc(day.transfer.to_city)}${day.transfer.drive_hours !== null ? ` · ${hours(day.transfer.drive_hours)} by ${esc(day.transfer.mode)}` : " · journey time missing"}`
+    : esc(day.city);
+
+  return `<section class="day">
+      <header>
+        <div><h2>Day ${day.day} · ${esc(day.city)}</h2><div class="where">${where}</div></div>
+        <div class="where">${hours(day.used_hours)} of ${hours(day.available_hours)} used</div>
+      </header>
+      ${bar}
+      ${sights}
+      ${day.notes && day.notes.length ? `<ul class="notes">${day.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
+    </section>`;
+}
+
+function render(plan) {
+  const summary = plan.summary;
+  const nights = Object.entries(summary.nights_per_city).map(([city, n]) => `${esc(city)} ${n}N`).join(" · ");
+  const stats = `<div class="stats">
+      <div class="stat"><b>${summary.days}</b><span>days · ${summary.total_nights} nights</span></div>
+      <div class="stat"><b>${summary.total_sights}</b><span>attractions</span></div>
+      <div class="stat"><b>${hours(summary.total_sightseeing_hours)}</b><span>sightseeing</span></div>
+      <div class="stat"><b>${hours(summary.total_local_travel_hours)}</b><span>local travel</span></div>
+      <div class="stat"><b>${hours(summary.total_intercity_drive_hours)}</b><span>intercity travel</span></div>
+    </div>`;
+
+  const route = plan.route.length
+    ? `<div class="route">${plan.route.map((leg) => `
+        <div class="leg${leg.data_gap ? " gap" : ""}">
+          <b>${esc(leg.from_city)} → ${esc(leg.to_city)}</b> ·
+          ${leg.drive_hours !== null ? `${hours(leg.drive_hours)}${leg.road_km ? ` · ${leg.road_km} km` : ""} · ${esc(leg.mode)}` : "no journey time in the dataset"}
+          ${leg.is_overnight ? " · overnight" : ""}
+        </div>`).join("")}</div>`
+    : "";
+
+  const missed = Object.keys(plan.unscheduled_reasons || {}).length
+    ? `<div class="missed"><h3>Must-visit sights that did not fit</h3><ul>${
+        Object.entries(plan.unscheduled_reasons).map(([label, reason]) =>
+          `<li><b>${esc(label)}</b> — ${esc(reason)}</li>`).join("")}</ul></div>`
+    : "";
+
+  const closed = (plan.closed_this_month || []).length
+    ? `<div class="missed"><h3>Closed in the chosen month</h3><ul>${
+        plan.closed_this_month.slice(0, 12).map((item) => `<li>${esc(item)}</li>`).join("")}</ul></div>`
+    : "";
+
+  lastPlan = plan;
+  $("out").innerHTML = `
+    <h2 style="margin:22px 0 0;letter-spacing:-.02em">${esc(plan.request.cities.join(" + "))}</h2>
+    <div class="where" style="color:var(--muted);font-size:13px">${esc(plan.request.pace)} pace · ${nights}${
+      summary.departure_day_reserved_for ? ` · departure: ${esc(summary.departure_day_reserved_for)}` : ""}</div>
+    ${stats}${validationBanner(plan.validation)}${route}
+    ${plan.days.map(dayCard).join("")}${changeLog(plan)}${addPanel(plan)}${missed}${closed}`;
+  window.scrollTo({ top: $("out").offsetTop - 20, behavior: "smooth" });
+}
+
+// --- editing: add, replace or remove sights, then rebuild the whole plan ---------------
+function changeLog(plan) {
+  if (!plan.edits || !plan.edits.length) return "";
+  return `<div class="changes"><h3 style="margin:0 0 8px;font-size:15px">Your changes</h3><ul>${
+    plan.edits.map((e) => `<li class="${e.applied ? "yes" : "no"}">${e.applied ? "\u2713" : "\u2715"} ${esc(e.message)}${
+      (e.suggestions || []).length
+        ? `<div class="daypick">${e.suggestions.map((s) =>
+            `<button data-try-day="${s.day}" data-try-sight="${esc(e.sight)}" data-try-replace="${esc(s.replace || "")}">${esc(s.detail)}</button>`
+          ).join("")}</div>`
+        : ""}</li>`).join("")}</ul>
+    <button class="mini" id="reset-edits" style="margin-top:6px">Undo all changes</button></div>`;
+}
+
+function addPanel(plan) {
+  const pool = plan.unscheduled_sights || [];
+  if (!pool.length) return "";
+  const reasons = plan.unscheduled_reasons || {};
+  const ordered = pool.slice().sort((a, b) => (reasons[b] ? 1 : 0) - (reasons[a] ? 1 : 0));
+  return `<div class="add-panel">
+      <h3>Not in the plan &mdash; add any of these</h3>
+      <div class="sub">Adding or replacing rebuilds the route, travel times and every day's schedule within the
+        daily limit. If a sight cannot fit the day you choose, you will be offered the days it does fit.</div>
+      ${ordered.slice(0, 15).map((label) => {
+        const city = label.split(" / ")[0];
+        const name = label.split(" / ").slice(1).join(" / ");
+        const why = reasons[label];
+        return `<div class="addable">
+          <div class="grow">
+            <div class="sight-name">${esc(name)} ${why ? `<span class="tag must">\u2605 must visit</span>` : ""}</div>
+            <div class="why">${esc(city)}${why ? ` &middot; ${esc(why)}` : ""}</div>
+          </div>
+          <button class="mini" data-add-sight="${esc(name)}" data-city="${esc(city)}">Add to Itinerary</button>
+        </div>`;
+      }).join("")}
+    </div>`;
+}
+
+async function runEdits(newEdits) {
+  if (!lastRequest) return;
+  edits = edits.concat(newEdits);
+  $("status").textContent = "Recalculating\u2026";
+  $("go").disabled = true;
+  try {
+    const response = await fetch("/itinerary/adjust", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ base: lastRequest, edits }),
+    });
+    const payload = await response.json();
+    if (!response.ok) { $("status").textContent = payload.detail || "Could not apply that change."; return; }
+    render(payload);
+  } finally {
+    $("go").disabled = false; $("status").textContent = "";
+  }
+}
+
+async function offerDays(sight, city, host) {
+  $("status").textContent = "Checking where it fits\u2026";
+  const response = await fetch("/itinerary/placement-options", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ base: lastRequest, sight, city }),
+  });
+  $("status").textContent = "";
+  if (!response.ok || !host) return;
+  const data = await response.json();
+  host.querySelector(".daypick")?.remove();
+  const picker = document.createElement("div");
+  picker.className = "daypick";
+  picker.innerHTML = data.options.map((option) => {
+    const common = `data-choose-sight="${esc(sight)}" data-choose-city="${esc(city)}" data-choose-day="${option.day}"`;
+    if (option.fits) {
+      return `<button class="fit" ${common}>Day ${option.day} \u00b7 ${option.spare_hours.toFixed(1)}h spare</button>`;
+    }
+    const swap = (option.replace_options || [])[0];
+    if (swap) {
+      return `<button class="swap" ${common} data-choose-replace="${esc(swap.sight)}">Day ${option.day} \u00b7 swap out ${esc(swap.sight)}</button>`;
+    }
+    if ((option.fits_if_dropped || []).length) {
+      return `<button class="swap" ${common} data-choose-replace="${esc(option.fits_if_dropped[0])}">Day ${option.day} \u00b7 needs ${option.fits_if_dropped.length} stops dropped</button>`;
+    }
+    return `<button class="no" disabled title="${esc((option.blockers || []).join(" "))}">Day ${option.day} \u00b7 full</button>`;
+  }).join("") +
+  `<button data-choose-sight="${esc(sight)}" data-choose-city="${esc(city)}" data-choose-day="">Let the planner choose</button>`;
+  // Nothing fits and nothing can be swapped out: say why, rather than showing dead buttons.
+  const hopeless = data.options.every((o) => !o.fits && !(o.replace_options || []).length && !(o.fits_if_dropped || []).length);
+  if (hopeless && data.options.length) {
+    picker.insertAdjacentHTML("afterbegin",
+      `<div class="why" style="flex-basis:100%">No day of this trip can hold ${esc(data.sight)}
+       (${data.duration_hours.toFixed(1)}h plus travel). Try a faster pace or an extra day in ${esc(data.city)}.</div>`);
+  }
+  host.appendChild(picker);
+}
+
+document.addEventListener("click", (event) => {
+  const addBtn = event.target.closest("[data-add-sight]");
+  const choose = event.target.closest("[data-choose-sight]");
+  const swap = event.target.closest("[data-swap]");
+  const drop = event.target.closest("[data-drop]");
+  const retry = event.target.closest("[data-try-sight]");
+  const reset = event.target.closest("#reset-edits");
+
+  if (addBtn) offerDays(addBtn.dataset.addSight, addBtn.dataset.city, addBtn.closest(".addable"));
+  if (choose) {
+    runEdits([{
+      action: choose.dataset.chooseReplace ? "replace" : "add",
+      sight: choose.dataset.chooseSight,
+      city: choose.dataset.chooseCity,
+      day: choose.dataset.chooseDay ? Number(choose.dataset.chooseDay) : null,
+      replaces: choose.dataset.chooseReplace || null,
+    }]);
+  }
+  if (retry) {
+    runEdits([{
+      action: retry.dataset.tryReplace ? "replace" : "add",
+      sight: retry.dataset.trySight,
+      city: null,
+      day: retry.dataset.tryDay ? Number(retry.dataset.tryDay) : null,
+      replaces: retry.dataset.tryReplace || null,
+    }]);
+  }
+  if (drop) runEdits([{ action: "remove", sight: drop.dataset.drop, city: drop.dataset.city }]);
+  if (swap) {
+    const pool = (lastPlan?.unscheduled_sights || []).map((label) => label.split(" / ").slice(1).join(" / "));
+    if (!pool.length) { $("status").textContent = "Every sight in this city is already scheduled."; return; }
+    const choice = window.prompt(
+      `Replace "${swap.dataset.swap}" on day ${swap.dataset.day} with which sight?\n\nAvailable:\n` + pool.slice(0, 15).join("\n"),
+      pool[0]);
+    if (choice) {
+      runEdits([{ action: "replace", sight: choice.trim(), city: swap.dataset.city,
+                  day: Number(swap.dataset.day), replaces: swap.dataset.swap }]);
+    }
+  }
+  if (reset) { edits = []; $("form").dispatchEvent(new Event("submit")); }
+});
+
+loadCities();
+</script>
+</body>
+</html>
