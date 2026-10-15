@@ -264,13 +264,19 @@ def test_missing_route_data_fails_instead_of_inventing_a_drive(dataset):
     assert any("city_distances" in entry["fix"] for entry in plan["validation"]["entries"])
 
 
-def test_overnight_leg_is_a_warning_not_a_failure(dataset):
-    """Delhi to Manali is 12h: impossible as a day drive, fine as an overnight bus."""
+def test_long_leg_becomes_a_full_travel_day(dataset):
+    """Delhi to Manali is 12h: too long to sightsee around, but one long travel day is fine.
+
+    The day stretches past the pace allowance because there is nothing to pace: no
+    sightseeing, just an early start.
+    """
     plan = build_itinerary(PlanRequest(cities=["Manali"], duration_days=4, origin_city="Delhi"), dataset)
-    assert plan["route"][0]["is_overnight"]
-    assert plan["days"][0]["available_hours"] == 0.0
+    leg, first_day = plan["route"][0], plan["days"][0]
+    assert leg["is_long_travel_day"] and not leg["is_overnight"]
+    assert first_day["time_budget"]["pace_allowance"] > PACE_ACTIVE_HOURS["moderate"]
+    assert first_day["available_hours"] == 0.0 and not first_day["sights"]
     assert plan["validation"]["passed"]
-    assert any("overnight" in warning for warning in plan["validation"]["warnings"])
+    assert any("full travel day" in warning for warning in plan["validation"]["warnings"])
 
 
 def test_long_journey_never_leaves_a_day_looking_free(dataset):
@@ -352,3 +358,25 @@ def test_strict_gate_passes_only_without_critical_issues(dataset, plan):
     report = validate_itinerary(broken, dataset, "moderate")
     assert not report.passed and report.as_dict()["critical_count"] >= 1
     assert all(entry["fix"] for entry in report.as_dict()["entries"] if entry["severity"] == "critical")
+
+
+def test_day_allocation_probe_accounts_for_the_departure_day(dataset):
+    """Leh to Pangong Lake: 5.5h in, a 140 km airport transfer out.
+
+    Both Pangong days are travel days, so the city needs a third day. The allocator used to
+    miss this because a part-filled allocation never reached the departure day, making its
+    last day look free.
+    """
+    plan = build_itinerary(PlanRequest(cities=["Leh", "Pangong Lake"], duration_days=5, pace="active"), dataset)
+    pangong_days = [day for day in plan["days"] if day["city"] == "Pangong Lake"]
+    assert len(pangong_days) >= 3
+    assert max(day["available_hours"] for day in pangong_days) >= 5, "one Pangong day must be usable"
+
+
+def test_day_trip_does_not_take_the_only_day_from_a_must_visit(dataset):
+    """Pangong Lake's other rows are 40-180 km away; the lake itself must still be scheduled."""
+    plan = build_itinerary(PlanRequest(cities=["Leh", "Pangong Lake"], duration_days=5, pace="active"), dataset)
+    scheduled = {sight["sight"] for day in plan["days"] for sight in day["sights"]}
+    assert "Pangong Lake" in scheduled
+    assert "Pangong Lake / Pangong Lake" not in plan["unscheduled_must_visits"]
+    assert plan["validation"]["passed"]

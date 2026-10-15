@@ -1,0 +1,70 @@
+severity,kind,key,detail,suggestion
+error,cannot_fit_any_day,Bikaner / Kheechan village,needs 16.3h (2.0h visit + 14.0h driving) but the longest possible day is 9h,"re-home it to a nearer city, or give it its own city row with a hotel"
+error,cannot_fit_any_day,Jodhpur / sand dunes around the resort,needs 13.0h (2.0h visit + 10.7h driving) but the longest possible day is 9h,"re-home it to a nearer city, or give it its own city row with a hotel"
+error,cannot_fit_any_day,Kasol / Kheerganga Trek,needs 9.6h (8.0h visit + 1.3h driving) but the longest possible day is 9h,"re-home it to a nearer city, or give it its own city row with a hotel"
+error,cannot_fit_any_day,Leh / Lachangla Pass,needs 14.4h (0.25h visit + 13.8h driving) but the longest possible day is 9h,"re-home it to a nearer city, or give it its own city row with a hotel"
+error,cannot_fit_any_day,Leh / Nakeela,needs 13.2h (0.25h visit + 12.7h driving) but the longest possible day is 9h,"re-home it to a nearer city, or give it its own city row with a hotel"
+error,cannot_fit_any_day,Leh / Pangong Lake,needs 14.1h (2.5h visit + 11.3h driving) but the longest possible day is 9h,"re-home it to a nearer city, or give it its own city row with a hotel"
+error,cannot_fit_any_day,Leh / Skyangchu Thang,needs 15.5h (1.0h visit + 14.2h driving) but the longest possible day is 9h,"re-home it to a nearer city, or give it its own city row with a hotel"
+error,cannot_fit_any_day,Leh / Tsokar Lake,needs 12.0h (1.0h visit + 10.7h driving) but the longest possible day is 9h,"re-home it to a nearer city, or give it its own city row with a hotel"
+error,cannot_fit_any_day,Leh / lamayuru monastery,needs 9.1h (1.0h visit + 7.8h driving) but the longest possible day is 9h,"re-home it to a nearer city, or give it its own city row with a hotel"
+error,cannot_fit_any_day,Pangong Lake / Safari,needs 15.9h (1.0h visit + 14.6h driving) but the longest possible day is 9h,"re-home it to a nearer city, or give it its own city row with a hotel"
+error,far_from_city,Bikaner / Kheechan village,175 km from the Bikaner centre,re-home to Manvar (34 km away)
+error,far_from_city,Jodhpur / sand dunes around the resort,134 km from the Jodhpur centre,re-home to Manvar (0 km away)
+error,far_from_city,Leh / Lachangla Pass,173 km from the Leh centre,re-home to Sarchu (9 km away)
+error,far_from_city,Leh / Nakeela,159 km from the Leh centre,re-home to Sarchu (23 km away)
+error,far_from_city,Leh / Pangong Lake,141 km from the Leh centre,re-home to Pangong Lake (0 km away)
+error,far_from_city,Leh / Skyangchu Thang,177 km from the Leh centre,re-home to Rupsho (39 km away)
+error,far_from_city,Leh / Tsokar Lake,133 km from the Leh centre,re-home to Rupsho (38 km away)
+error,far_from_city,Pangong Lake / Safari,183 km from the Pangong Lake centre,re-home to Hundar (0 km away)
+error,no_route_data,Ajmer -> Bassi,"sold together in the itineraries sheet, but there is no journey time (226 km apart)",add a city_distances row (mode=flight/train/road) with the real duration
+error,no_route_data,Alchi -> Sham Valley,"sold together in the itineraries sheet, but there is no journey time (10 km apart)",add a city_distances row (mode=flight/train/road) with the real duration
+error,no_route_data,Bassi -> Pushkar,"sold together in the itineraries sheet, but there is no journey time (232 km apart)",add a city_distances row (mode=flight/train/road) with the real duration
+error,no_route_data,Bassi -> Udaipur,"sold together in the itineraries sheet, but there is no journey time (130 km apart)",add a city_distances row (mode=flight/train/road) with the real duration
+error,no_route_data,Delhi -> Jaipur,"sold together in the itineraries sheet, but there is no journey time (306 km apart)",add a city_distances row (mode=flight/train/road) with the real duration
+error,no_route_data,Indus Valley -> Leh,"sold together in the itineraries sheet, but there is no journey time (5 km apart)",add a city_distances row (mode=flight/train/road) with the real duration
+error,no_route_data,Indus Valley -> Pangong Lake,"sold together in the itineraries sheet, but there is no journey time (143 km apart)",add a city_distances row (mode=flight/train/road) with the real duration
+error,no_route_data,Kargil -> Ladakh,"sold together in the itineraries sheet, but there is no journey time (183 km apart)",add a city_distances row (mode=flight/train/road) with the real duration
+error,no_route_data,Ladakh -> Leh,"sold together in the itineraries sheet, but there is no journey time",add a city_distances row (mode=flight/train/road) with the real duration
+error,no_route_data,Leh -> Manali,"sold together in the itineraries sheet, but there is no journey time (280 km apart)",add a city_distances row (mode=flight/train/road) with the real duration
+error,no_route_data,Leh -> Sham Valley,"sold together in the itineraries sheet, but there is no journey time (59 km apart)",add a city_distances row (mode=flight/train/road) with the real duration
+error,no_route_data,Leh -> Ule,"sold together in the itineraries sheet, but there is no journey time (64 km apart)",add a city_distances row (mode=flight/train/road) with the real duration
+error,no_route_data,Nubra Valley -> Ule,"sold together in the itineraries sheet, but there is no journey time (79 km apart)",add a city_distances row (mode=flight/train/road) with the real duration
+error,no_route_data,Rupsho -> Tsomoriri,"sold together in the itineraries sheet, but there is no journey time (31 km apart)",add a city_distances row (mode=flight/train/road) with the real duration
+warning,far_from_city,Bikaner / Gajner Palace,47 km from the Bikaner centre,"keep as a day trip, or split it into its own city row"
+warning,far_from_city,Jaisalmer / Kanoi Village,42 km from the Jaisalmer centre,re-home to Sam Dunes (10 km away)
+warning,far_from_city,Jaisalmer / Khaba Fort,40 km from the Jaisalmer centre,re-home to Sam Dunes (29 km away)
+warning,far_from_city,Jaisalmer / Khuri,42 km from the Jaisalmer centre,"keep as a day trip, or split it into its own city row"
+warning,far_from_city,Jaisalmer / Sam Sand Dunes,52 km from the Jaisalmer centre,re-home to Sam Dunes (0 km away)
+warning,far_from_city,Kanyakumari / Padmanabapuram Palace,38 km from the Kanyakumari centre,"keep as a day trip, or split it into its own city row"
+warning,far_from_city,Kargil / Drass Village,48 km from the Kargil centre,"keep as a day trip, or split it into its own city row"
+warning,far_from_city,Kargil / Mulbek,40 km from the Kargil centre,"keep as a day trip, or split it into its own city row"
+warning,far_from_city,Kargil / Tiger Hills,42 km from the Kargil centre,"keep as a day trip, or split it into its own city row"
+warning,far_from_city,Leh / Alchi Monastery,49 km from the Leh centre,re-home to Alchi (0 km away)
+warning,far_from_city,Leh / Basgo Monastery,38 km from the Leh centre,re-home to Basgo (0 km away)
+warning,far_from_city,Leh / Changla Pass,46 km from the Leh centre,re-home to Changla (0 km away)
+warning,far_from_city,Leh / Disket monastery,56 km from the Leh centre,re-home to Diskit (0 km away)
+warning,far_from_city,Leh / Hemis Monastery,38 km from the Leh centre,re-home to Hemis (0 km away)
+warning,far_from_city,Leh / Likir Monastery,52 km from the Leh centre,re-home to Likir (0 km away)
+warning,far_from_city,Leh / Moon landscapes,67 km from the Leh centre,re-home to Ule (2 km away)
+warning,far_from_city,Leh / Tanglang La Pass,95 km from the Leh centre,re-home to Hemis (59 km away)
+warning,far_from_city,Leh / lamayuru monastery,98 km from the Leh centre,re-home to Lamayuru (0 km away)
+warning,far_from_city,Leh / sand dunes,62 km from the Leh centre,re-home to Hundar (0 km away)
+warning,far_from_city,Munnar / Rubber Plantations,48 km from the Munnar centre,"keep as a day trip, or split it into its own city row"
+warning,far_from_city,Nubra Valley / khardung-la-pass,47 km from the Nubra Valley centre,re-home to Ladakh (19 km away)
+warning,far_from_city,Pangong Lake / Changthang Valley,40 km from the Pangong Lake centre,"keep as a day trip, or split it into its own city row"
+warning,far_from_city,Pangong Lake / Durbuk,64 km from the Pangong Lake centre,re-home to Changla (37 km away)
+warning,far_from_city,Pangong Lake / changla pass,95 km from the Pangong Lake centre,re-home to Changla (0 km away)
+warning,far_from_city,Sarchu / Keylong,80 km from the Sarchu centre,re-home to Manali (52 km away)
+warning,far_from_city,Udaipur / Chetak Smarak,45 km from the Udaipur centre,re-home to Haldi Ghati (0 km away)
+warning,far_from_city,Udaipur / Haldi Ghati,45 km from the Udaipur centre,re-home to Haldi Ghati (0 km away)
+warning,far_from_city,Udaipur / Nathdwara,53 km from the Udaipur centre,re-home to Nathdwara (0 km away)
+warning,road_only_long_haul,Delhi -> Kasol,12.0h by road only,add a flight or train row so the trip does not lose a whole day
+warning,road_only_long_haul,Delhi -> Manali,12.0h by road only,add a flight or train row so the trip does not lose a whole day
+warning,road_only_long_haul,Jaisalmer -> Ranakpur,10.5h by road only,add a flight or train row so the trip does not lose a whole day
+warning,road_only_long_haul,Kargil -> Pangong Lake,11.5h by road only,add a flight or train row so the trip does not lose a whole day
+warning,road_only_long_haul,Mandawa -> Manvar,11.5h by road only,add a flight or train row so the trip does not lose a whole day
+warning,sight_named_after_city,Ajmer / Ajmer,the sight and its city have the same name,"harmless, but rename the sight (e.g. 'Pangong Tso lakefront') if the duplication bothers you"
+warning,sight_named_after_city,Mandawa / Mandawa,the sight and its city have the same name,"harmless, but rename the sight (e.g. 'Pangong Tso lakefront') if the duplication bothers you"
+warning,sight_named_after_city,Nubra Valley / Nubra Valley,the sight and its city have the same name,"harmless, but rename the sight (e.g. 'Pangong Tso lakefront') if the duplication bothers you"
+warning,sight_named_after_city,Pangong Lake / Pangong Lake,the sight and its city have the same name,"harmless, but rename the sight (e.g. 'Pangong Tso lakefront') if the duplication bothers you"

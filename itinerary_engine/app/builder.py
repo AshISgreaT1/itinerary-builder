@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pandas as pd
 
@@ -17,6 +17,7 @@ from .config import (
     SIGHT_BUFFER_HOURS,
 )
 from .data_loader import Dataset, get_dataset
+from .enroute import EnRouteStop, plan_en_route
 from .geo import RouteLeg, local_travel_hours, parse_access_distance_km, road_km, transfer_hours_for_distance
 from .normalization import normalize_key
 from .solver import DaySlot, PackedDay, pace_hours, plan_city, sort_by_priority
@@ -100,8 +101,14 @@ def _usable_hours_by_city(
     Days are not interchangeable: the day a traveller drives in is mostly gone, and so is
     the day they fly home. Allocating on day counts alone is what leaves a last city with
     a single day that is both, and therefore empty.
+
+    The candidate is measured as if it were the whole trip. Otherwise a part-filled
+    allocation never reaches the departure day, its final day looks like a free one, and a
+    city that is really all travel (Leh to Pangong Lake: 5.5h in, a 140 km airport transfer
+    out) is judged "already covered" and never gets a usable day.
     """
-    slots, _ = build_day_slots(dataset, request, city_keys, allocation)
+    probe = replace(request, duration_days=max(1, sum(allocation.values())))
+    slots, _ = build_day_slots(dataset, probe, city_keys, allocation)
     usable = {key: 0.0 for key in city_keys}
     for slot in slots:
         usable[slot.city_key] += slot.available_hours(pace)
@@ -257,6 +264,23 @@ def build_itinerary(request: PlanRequest, dataset: Dataset | None = None) -> dic
     allocation = allocate_city_days(dataset, city_keys, request.duration_days, pace, request)
     slots, legs = build_day_slots(dataset, request, city_keys, allocation)
 
+    # En-route stops first: they belong to the drive, not to either city, and the hours
+    # they take must be reserved before the destination city packs its own day.
+    trip_city_keys = set(city_keys)
+    en_route_by_day: dict[int, list[EnRouteStop]] = {}
+    en_route_keys: set[str] = set()
+    for slot in slots:
+        if slot.transfer is None:
+            continue
+        budget = slot.available_hours(pace)
+        stops = plan_en_route(dataset, slot.transfer, budget, trip_city_keys, request.start_month, en_route_keys)
+        if not stops:
+            continue
+        en_route_by_day[slot.day] = stops
+        en_route_keys |= {str(stop.sight["sight_key"]) for stop in stops}
+        # Whatever the stops cost is no longer available to the destination city.
+        slot.available_override = max(0.0, round(budget - sum(stop.cost_hours for stop in stops), 2))
+
     packed_days: list[PackedDay] = []
     cluster_methods: dict[str, str] = {}
     skipped_by_season: list[str] = []
@@ -266,6 +290,8 @@ def build_itinerary(request: PlanRequest, dataset: Dataset | None = None) -> dic
         usable_slots = [slot for slot in city_slots if slot.available_hours(pace) > 0]
         days_in_city = len(city_slots)
         eligible = _eligible_sights(dataset, key, days_in_city, request.start_month, request)
+        if en_route_keys and not eligible.empty:
+            eligible = eligible[~eligible["sight_key"].isin(en_route_keys)].reset_index(drop=True)
         all_city_sights = dataset.city_sights(key)
         if request.start_month is not None:
             closed = all_city_sights[~all_city_sights["sight"].isin(eligible["sight"])]
@@ -279,7 +305,8 @@ def build_itinerary(request: PlanRequest, dataset: Dataset | None = None) -> dic
         packed_days += plan_city(clustered.clusters, clustered.excursions, city_slots, pace)
 
     packed_days.sort(key=lambda day: day.slot.day)
-    payload = _assemble_payload(dataset, request, pace, packed_days, legs, allocation, cluster_methods, skipped_by_season)
+    payload = _assemble_payload(dataset, request, pace, packed_days, legs, allocation, cluster_methods,
+                                skipped_by_season, en_route_by_day)
     payload["unscheduled_reasons"] = _unscheduled_reasons(dataset, payload["unscheduled_must_visits"], slots, pace)
     report = validate_itinerary(payload, dataset, pace, request.start_month)
     payload["validation"] = report.as_dict()
@@ -297,14 +324,24 @@ def _assemble_payload(
     allocation: dict[str, int],
     cluster_methods: dict[str, str],
     skipped_by_season: list[str],
+    en_route_by_day: dict[int, list[EnRouteStop]] | None = None,
 ) -> dict:
     """Turn packed days into the response JSON, joining descriptions on (city, sight)."""
     days_payload = []
     scheduled: set[tuple[str, str]] = set()
 
+    en_route_by_day = en_route_by_day or {}
     for packed in packed_days:
         slot = packed.slot
         sights_payload = []
+        stops = en_route_by_day.get(slot.day, [])
+        for stop in stops:  # visited during the drive, in road order
+            entry = stop.payload()
+            if request.include_descriptions:
+                entry["description"] = dataset.description(entry["home_city"], entry["sight"])
+            sights_payload.append(entry)
+            scheduled.add((normalize_key(entry["home_city"]), normalize_key(entry["sight"])))
+        en_route_hours = round(sum(stop.cost_hours for stop in stops), 2)
         for sight in packed.sights:
             enriched = dict(sight)
             if request.include_descriptions:
@@ -327,16 +364,17 @@ def _assemble_payload(
                     "day_overhead_hours": round(costs["day_overheads"], 2),
                     "departure_cost_hours": round(slot.departure_cost_hours, 2) if slot.is_departure else 0.0,
                 },
-                "available_hours": slot.available_hours(pace),
-                "used_hours": packed.used_hours,
+                "available_hours": round(slot.available_hours(pace) + en_route_hours, 2),
+                "used_hours": round(packed.used_hours + en_route_hours, 2),
                 "spare_hours": round(slot.available_hours(pace) - packed.used_hours, 2),
-                "sightseeing_hours": packed.sightseeing_hours,
-                "buffer_hours": packed.buffer_hours,
-                "local_travel_hours": packed.local_travel_hours,
+                "en_route_hours": en_route_hours,
+                "sightseeing_hours": round(packed.sightseeing_hours + sum(float(s.sight["duration_hours"]) for s in stops), 2),
+                "buffer_hours": round(packed.buffer_hours + SIGHT_BUFFER_HOURS * len(stops), 2),
+                "local_travel_hours": round(packed.local_travel_hours + sum(s.detour_hours for s in stops), 2),
                 "route_km": packed.route_km,
                 "max_leg_km": packed.max_leg_km,
                 "sights": sights_payload,
-                "notes": _day_notes(slot, packed),
+                "notes": _day_notes(slot, packed, stops),
             }
         )
 
@@ -439,7 +477,7 @@ def _unscheduled_reasons(dataset: Dataset, unscheduled: list[str], slots: list[D
     return reasons
 
 
-def _day_notes(slot: DaySlot, packed: PackedDay) -> list[str]:
+def _day_notes(slot: DaySlot, packed: PackedDay, stops: list[EnRouteStop] | None = None) -> list[str]:
     """Human-readable reasons a day looks the way it does."""
     notes: list[str] = []
     if slot.transfer:
@@ -461,7 +499,10 @@ def _day_notes(slot: DaySlot, packed: PackedDay) -> list[str]:
         notes.append("Arrival day: time reserved for reaching the hotel and checking in.")
     if slot.is_departure:
         notes.append(f"Departure day: {slot.departure_cost_hours:.1f}h reserved for check-out and the onward transfer.")
-    if not packed.sights:
+    if stops:
+        names = ", ".join(f"{stop.sight['sight']} ({stop.detour_km:.0f} km off the road)" for stop in stops)
+        notes.append(f"Stops made on the way: {names}.")
+    if not packed.sights and not stops:
         notes.append("No sightseeing fits this day once travel and check-in are counted.")
     elif any(s["is_excursion"] for s in packed.sights):
         notes.append("Day trip outside the city; the rest of the day is kept light.")

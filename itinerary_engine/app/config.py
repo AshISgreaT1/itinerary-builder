@@ -47,6 +47,19 @@ SPEED_CHECK_MIN_KM: Final[float] = 50.0
 #: Speed used when a dataset leg's own drive_hours is implausible and has to be recomputed.
 RECOMPUTE_ROAD_SPEED_KMPH: Final[float] = 45.0
 
+#: A day given over entirely to travel has no sightseeing to fit around, so it can start
+#: early and run long: this is the most driving such a day can absorb.
+TRAVEL_DAY_MAX_DRIVE_HOURS: Final[float] = 13.0
+
+# --- En-route stops (sights passed on the way between two cities) -------------------
+#: How far off the road a stop may be before it stops being "on the way".
+EN_ROUTE_MAX_DETOUR_KM: Final[float] = 15.0
+#: Most en-route stops on one transfer day: the drive is still the point of the day.
+EN_ROUTE_MAX_STOPS: Final[int] = 3
+#: Ignore the first and last stretch of the leg; those sights belong to the cities.
+EN_ROUTE_MIN_PROGRESS: Final[float] = 0.05
+EN_ROUTE_MAX_PROGRESS: Final[float] = 0.95
+
 # --- Arrival / departure logistics --------------------------------------------------
 #: Hotel checkout on the departure day.
 CHECKOUT_HOURS: Final[float] = 0.5

@@ -95,6 +95,8 @@
     border: 1px solid var(--line); color: var(--muted); }
   .tag.must { color: var(--brand-ink); border-color: var(--brand); }
   .tag.trip { color: var(--warn); border-color: var(--warn); }
+  .tag.road { color: var(--accent); border-color: var(--accent); }
+  ol.sights li.en-route { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 7%, transparent), transparent); }
   .desc { color: var(--muted); font-size: 13.5px; margin-top: 6px; }
   .notes { margin: 0; padding: 10px 18px 14px; color: var(--muted); font-size: 13px; }
   .notes li { margin-bottom: 3px; }
@@ -188,6 +190,12 @@ let cities = [], chosen = [], lastRequest = null, lastPlan = null, edits = [];
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const hours = (value) => `${(Math.round(value * 10) / 10).toFixed(1)}h`;
+// "Pangong Lake / Pangong Lake" is a city whose main sight carries the same name: show it once.
+const prettyLabel = (label) => {
+  const [city, ...rest] = String(label).split(" / ");
+  const name = rest.join(" / ");
+  return !name || name.toLowerCase() === city.toLowerCase() ? city : `${city} / ${name}`;
+};
 
 async function loadCities() {
   // Destinations must have sightseeing rows; an origin only needs to exist (e.g. Delhi).
@@ -296,8 +304,8 @@ function dayCard(day) {
 
   const sights = day.sights.length
     ? `<ol class="sights">${day.sights.map((sight, index) => `
-        <li>
-          <div class="num">${index + 1}</div>
+        <li class="${sight.en_route ? "en-route" : ""}">
+          <div class="num">${sight.en_route ? "&#9655;" : index + 1}</div>
           <div>
             <div class="sight-name">${esc(sight.sight)}</div>
             <div class="tags">
@@ -306,6 +314,7 @@ function dayCard(day) {
               ${sight.visit_type ? `<span class="tag">${esc(sight.visit_type)}</span>` : ""}
               ${sight.must_visit ? `<span class="tag must">★ must visit</span>` : ""}
               ${sight.is_excursion ? `<span class="tag trip">day trip · ${sight.distance_from_centre_km} km</span>` : ""}
+              ${sight.en_route ? `<span class="tag road">on the way · ${sight.detour_km} km off the road</span>` : ""}
             </div>
             ${sight.description ? `<div class="desc">${esc(sight.description)}</div>` : ""}
           </div>
@@ -354,7 +363,7 @@ function render(plan) {
   const missed = Object.keys(plan.unscheduled_reasons || {}).length
     ? `<div class="missed"><h3>Must-visit sights that did not fit</h3><ul>${
         Object.entries(plan.unscheduled_reasons).map(([label, reason]) =>
-          `<li><b>${esc(label)}</b> — ${esc(reason)}</li>`).join("")}</ul></div>`
+          `<li><b>${esc(prettyLabel(label))}</b> — ${esc(reason)}</li>`).join("")}</ul></div>`
     : "";
 
   const closed = (plan.closed_this_month || []).length
@@ -401,7 +410,7 @@ function addPanel(plan) {
         return `<div class="addable">
           <div class="grow">
             <div class="sight-name">${esc(name)} ${why ? `<span class="tag must">\u2605 must visit</span>` : ""}</div>
-            <div class="why">${esc(city)}${why ? ` &middot; ${esc(why)}` : ""}</div>
+            <div class="why">${esc(city === name ? "in this city" : city)}${why ? ` &middot; ${esc(why)}` : ""}</div>
           </div>
           <button class="mini" data-add-sight="${esc(name)}" data-city="${esc(city)}">Add to Itinerary</button>
         </div>`;

@@ -19,6 +19,7 @@ from .config import (
     MAX_ROAD_SPEED_KMPH,
     MAX_SINGLE_DAY_TRAVEL_HOURS,
     MIN_ROAD_SPEED_KMPH,
+    TRAVEL_DAY_MAX_DRIVE_HOURS,
     RECOMPUTE_ROAD_SPEED_KMPH,
     ROAD_DISTANCE_FACTOR,
     SPEED_CHECK_MIN_KM,
@@ -85,26 +86,39 @@ class RouteLeg:
         """Whole days this journey consumes (1 unless it is longer than a travel day)."""
         if self.drive_hours is None:
             return 1
-        return max(1, math.ceil(self.drive_hours / MAX_SINGLE_DAY_TRAVEL_HOURS))
+        return max(1, math.ceil(self.drive_hours / TRAVEL_DAY_MAX_DRIVE_HOURS))
 
     @property
     def fits_one_day(self) -> bool:
+        """Can this journey be done within a single day, sightseeing or not?"""
+        return self.drive_hours is not None and self.drive_hours <= TRAVEL_DAY_MAX_DRIVE_HOURS
+
+    @property
+    def leaves_room_for_sightseeing(self) -> bool:
         return self.drive_hours is not None and self.drive_hours <= MAX_SINGLE_DAY_TRAVEL_HOURS
 
     @property
-    def is_overnight(self) -> bool:
-        """Doable as an overnight bus/train: too long for a day, short enough for a night."""
+    def is_long_travel_day(self) -> bool:
+        """Fills a day on its own: an early start, no sightseeing, but doable by daylight."""
         return (
             self.drive_hours is not None
-            and MAX_SINGLE_DAY_TRAVEL_HOURS < self.drive_hours <= MAX_OVERNIGHT_TRAVEL_HOURS
+            and MAX_SINGLE_DAY_TRAVEL_HOURS < self.drive_hours <= TRAVEL_DAY_MAX_DRIVE_HOURS
+        )
+
+    @property
+    def is_overnight(self) -> bool:
+        """Too long even for a full travel day, but short enough for an overnight bus/train."""
+        return (
+            self.drive_hours is not None
+            and TRAVEL_DAY_MAX_DRIVE_HOURS < self.drive_hours <= MAX_OVERNIGHT_TRAVEL_HOURS
         )
 
     @property
     def hours_charged_to_day(self) -> float:
-        """Hours this leg takes out of the arrival day's sightseeing budget."""
+        """Hours this leg takes out of the arrival day's budget."""
         if self.drive_hours is None:
             return float("inf")  # unknown journey: the day cannot be planned
-        return min(self.drive_hours, MAX_SINGLE_DAY_TRAVEL_HOURS)
+        return min(self.drive_hours, TRAVEL_DAY_MAX_DRIVE_HOURS)
 
     def as_dict(self) -> dict:
         return {
@@ -118,6 +132,7 @@ class RouteLeg:
             "data_gap": self.data_gap,
             "travel_days_needed": self.travel_days_needed,
             "is_overnight": self.is_overnight,
+            "is_long_travel_day": self.is_long_travel_day,
             "notes": self.notes,
         }
 
@@ -241,6 +256,25 @@ class CityGraph:
         else:
             leg.notes.append(f"no route data and no coordinates for {from_city} or {to_city}.")
         return leg
+
+
+def point_to_segment_km(lat: float, lon: float, a_lat: float, a_lon: float, b_lat: float, b_lon: float) -> tuple[float, float]:
+    """Distance from a point to the straight line A->B, and how far along that line it falls.
+
+    Returns (km off the line, progress from 0 at A to 1 at B). A local flat projection is
+    accurate enough over the few hundred km of a single road leg.
+    """
+    if any(pd.isna(value) for value in (lat, lon, a_lat, a_lon, b_lat, b_lon)):
+        return float("nan"), 0.0
+    scale = math.cos(math.radians((float(a_lat) + float(b_lat)) / 2))
+    ax, ay = float(a_lon) * scale, float(a_lat)
+    bx, by = float(b_lon) * scale, float(b_lat)
+    px, py = float(lon) * scale, float(lat)
+    dx, dy = bx - ax, by - ay
+    length_sq = dx * dx + dy * dy
+    progress = 0.0 if length_sq == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_sq))
+    nearest_x, nearest_y = ax + progress * dx, ay + progress * dy
+    return haversine_km(lat, lon, nearest_y, nearest_x / scale), progress
 
 
 def order_by_route(sights: pd.DataFrame, start_lat: float, start_lon: float) -> list[int]:

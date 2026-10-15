@@ -38,6 +38,7 @@ python -m app.cli --cities Manali Kasol --days 5 --pace moderate --from Delhi --
 | GET | `/cities` | Cities that can be planned, with sight counts |
 | GET | `/cities/{city}/sights` | A city's canonical sights in priority order |
 | GET | `/health` | Dataset loaded, row counts, duplicates merged |
+| GET | `/data-quality` | Dataset problems that distort itineraries, with suggested fixes |
 
 ```bash
 curl -X POST http://127.0.0.1:8000/generate-itinerary \
@@ -101,6 +102,22 @@ available = pace allowance
   the distance in the dataset's own `nearest_airport` / `nearest_railhead` cell. When that
   cell has no distance, a clearly labelled assumption is used and listed in `data_gaps`.
 
+## Stops on the way, and days that are only travel
+
+**En-route stops.** A sight you simply drive past does not belong to either city: Chang La
+sits 1.4 km off the Leh to Pangong Lake road, a third of the way along, but 77 km from Leh
+and 95 km from the lake, so neither city could ever host it. Such a sight is attached to the
+transfer day and charged only the detour off the road plus the stop itself. It is taken en
+route only when **no** city on the trip could reasonably hold it, so Thiksey (19 km from
+Leh) stays a Leh day trip. Controlled by `EN_ROUTE_MAX_DETOUR_KM` (15 km) and
+`EN_ROUTE_MAX_STOPS` (3); each stop reports `detour_km` and `along_route_percent`.
+
+**Travel-only days stretch.** A day given over entirely to driving has no sightseeing to
+pace, so it may start early and run to `TRAVEL_DAY_MAX_DRIVE_HOURS` (13 h) instead of the
+pace allowance. Delhi to Manali (12 h) is therefore one long travel day rather than an
+impossible one. Past 13 h it needs an overnight bus or train, and past
+`MAX_OVERNIGHT_TRAVEL_HOURS` (14 h) validation fails.
+
 ## Rules the engine enforces
 
 | Rule | Where | Default |
@@ -111,6 +128,8 @@ available = pace allowance
 | Distance between consecutive stops | `MAX_LEG_KM` | 30 km |
 | Sight-to-sight route per day | `MAX_DAY_ROUTE_KM` | 70 km |
 | Day trip (far from the city) | `EXCURSION_KM`, `MAX_STOPS_WITH_EXCURSION` | 35 km, 2 other stops |
+| Stop made during a drive | `EN_ROUTE_MAX_DETOUR_KM`, `EN_ROUTE_MAX_STOPS` | 15 km off the road, 3 stops |
+| Longest pure travel day | `TRAVEL_DAY_MAX_DRIVE_HOURS` | 13 h driving |
 | Wrong-city detection | `WRONG_CITY_KM` | 120 km from the city centre |
 | Every city gets usable time | `MIN_CITY_USABLE_FRACTION` | half a day |
 
@@ -181,18 +200,42 @@ curl -X POST http://127.0.0.1:8000/itinerary/adjust   -H "Content-Type: applicat
 Each edit comes back in `edits[]` with `applied`, `placed_on_day`, a plain-English
 `message` and, when it failed, `suggestions`.
 
+## Dataset quality report
+
+The planner is only as sensible as the rows it reads, so the same rules run against the
+dataset itself:
+
+```bash
+python -m app.datacheck                    # readable report
+python -m app.datacheck --csv findings.csv # one row per finding
+curl http://127.0.0.1:8000/data-quality    # same thing as JSON
+```
+
+| Finding | Meaning |
+|---|---|
+| `far_from_city` | the sight sits far from the city it is filed under, with the nearest city suggested |
+| `cannot_fit_any_day` | visit + driving exceeds the longest possible day, so no trip can ever include it |
+| `no_route_data` | two cities the `itineraries` sheet sells together have no journey time |
+| `road_only_long_haul` | the only route is a drive longer than a travel day |
+| `sight_named_after_city` | cosmetic: "Pangong Lake / Pangong Lake" |
+
+Nothing is changed and nothing is guessed: every suggestion comes from coordinates and rows
+already in the workbook. On `sample_dataset_v4_clean.xlsx` it reports 69 findings, including
+"Leh / Pangong Lake: 141 km from the Leh centre -> re-home to Pangong Lake (0 km away)".
+
 ## Tests
 
 ```bash
 python -m pytest tests -q
 ```
 
-60 tests: dataset loading and month parsing, clustering determinism, pace and distance caps
+80 tests: dataset loading and month parsing, clustering determinism, pace and distance caps
 on real plans, seasonal filtering, day-allocation fairness, the API endpoints, travel
 realism (missing route data, overnight legs, travel-only days), departure-day reservations,
 hotel-night consistency, the Goa December and June/September cases, fault injection
 (a deliberately corrupted plan must fail validation), and the editing API (add, replace,
-remove, pinning to a day, and the suggestions when a sight will not fit).
+remove, pinning to a day, and the suggestions when a sight will not fit), and the dataset
+quality report, en-route stops, and travel-only days.
 
 ## Layout
 
@@ -207,6 +250,8 @@ app/
   builder.py        orchestration, descriptions join, JSON payload
   validation.py     feasibility report
   edits.py          add / replace / remove, placement options, rebuild
+  datacheck.py      dataset quality report (CLI + /data-quality)
+  enroute.py        stops made on the way between two cities
   models.py         pydantic request/response schemas
   main.py           FastAPI app (also serves the UI)
   static/           the planning UI (single page, no build step)

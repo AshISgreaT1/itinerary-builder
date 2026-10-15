@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from .builder import PinnedSight, PlanningError, PlanRequest, build_itinerary
 from .edits import SightEdit, apply_edits, placement_options
 from .data_loader import get_dataset
+from .datacheck import run_checks
 from .models import AdjustRequest, ItineraryRequest, ItineraryResponse, PlacementQuery
 from .normalization import normalize_key
 
@@ -114,6 +115,18 @@ def _plan_request(request: ItineraryRequest) -> PlanRequest:
         pinned_sights=[PinnedSight(sight=p.sight, city=p.city, day=p.day) for p in request.pinned_sights],
         excluded_sights=list(request.excluded_sights),
     )
+
+
+@app.get("/data-quality", tags=["meta"])
+def data_quality(kind: str | None = Query(None, description="Only this finding kind")) -> dict:
+    """Dataset problems that distort itineraries, with the evidence and a suggested fix."""
+    findings = [finding.__dict__ for finding in run_checks(get_dataset())]
+    if kind:
+        findings = [finding for finding in findings if finding["kind"] == kind]
+    counts: dict[str, int] = {}
+    for finding in findings:
+        counts[finding["kind"]] = counts.get(finding["kind"], 0) + 1
+    return {"count": len(findings), "by_kind": counts, "findings": findings}
 
 
 @app.post("/generate-itinerary", response_model=ItineraryResponse, tags=["planning"])

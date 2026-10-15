@@ -16,19 +16,21 @@ from dataclasses import dataclass, field
 
 from .config import (
     BEST_TIME_ORDER,
+    EN_ROUTE_MAX_DETOUR_KM,
     MAX_DAY_ROUTE_KM,
     MAX_LEG_KM,
     MAX_OVERNIGHT_TRAVEL_HOURS,
     MAX_SIGHTS_PER_DAY,
     MAX_SINGLE_DAY_TRAVEL_HOURS,
     MAX_STOPS_WITH_EXCURSION,
+    TRAVEL_DAY_MAX_DRIVE_HOURS,
     MIN_DEPARTURE_BUFFER_HOURS,
     PACE_ACTIVE_HOURS,
     SIGHT_BUFFER_HOURS,
     WRONG_CITY_KM,
 )
 from .data_loader import Dataset
-from .geo import local_travel_hours, order_by_route, road_km
+from .geo import local_travel_hours, order_by_route, point_to_segment_km, road_km
 from .normalization import names_contain, normalize_key
 
 CATEGORIES = (
@@ -149,7 +151,7 @@ def _check_travel(payload: dict, report: ValidationReport) -> None:
                 f"(flight/train) to city_distances, or drop one of the two cities.",
                 number,
             )
-        elif leg.get("is_overnight"):
+        elif hours > TRAVEL_DAY_MAX_DRIVE_HOURS:
             report.warn(
                 "travel_feasibility",
                 f"Day {number}: {route} is {hours:.1f}h, which only works as an overnight journey; "
@@ -157,7 +159,16 @@ def _check_travel(payload: dict, report: ValidationReport) -> None:
                 "Confirm an overnight bus or train exists on this route, or fly.",
                 number,
             )
-        if day.get("sights") and (hours > MAX_SINGLE_DAY_TRAVEL_HOURS or day.get("is_travel_only")):
+        elif hours > MAX_SINGLE_DAY_TRAVEL_HOURS:
+            report.warn(
+                "travel_feasibility",
+                f"Day {number}: {route} is {hours:.1f}h -- a full travel day with an early start and no "
+                f"sightseeing.",
+                "Fine as a dedicated travel day; take an overnight bus or train if you would rather sleep through it.",
+                number,
+            )
+        city_sights = [sight for sight in day.get("sights", []) if not sight.get("en_route")]
+        if city_sights and (hours > TRAVEL_DAY_MAX_DRIVE_HOURS or day.get("is_travel_only")):
             report.critical(
                 "travel_feasibility",
                 f"Day {number}: sightseeing is scheduled on a day that is entirely taken by travel.",
@@ -184,15 +195,53 @@ def _check_travel(payload: dict, report: ValidationReport) -> None:
 # --------------------------------------------------------------------------------------
 # 2. Route data: recompute every day's geometry instead of trusting the planner.
 # --------------------------------------------------------------------------------------
+def _en_route_hours(day: dict, dataset: Dataset) -> tuple[float, float, float, list[str]]:
+    """Recompute what the day's en-route stops cost: detour driving, visits, buffers.
+
+    A stop made while driving is charged the detour off the road, not a round trip from a
+    hotel, so it is measured against the leg rather than the city centre.
+    """
+    stops = [sight for sight in day.get("sights", []) if sight.get("en_route")]
+    if not stops:
+        return 0.0, 0.0, 0.0, []
+    problems: list[str] = []
+    transfer = day.get("transfer")
+    if not transfer:
+        return 0.0, 0.0, 0.0, [f"Day {day.get('day')}: en-route stops on a day with no journey."]
+    from_row = dataset.city_row(transfer.get("from_city", ""))
+    to_row = dataset.city_row(transfer.get("to_city", ""))
+    if from_row is None or to_row is None:
+        return 0.0, 0.0, 0.0, [f"Day {day.get('day')}: en-route stops on a leg whose cities are unknown."]
+
+    detour_hours = 0.0
+    for stop in stops:
+        detour_km, progress = point_to_segment_km(
+            float(stop["lat"]), float(stop["lon"]),
+            float(from_row["lat"]), float(from_row["lon"]), float(to_row["lat"]), float(to_row["lon"]),
+        )
+        detour_hours += local_travel_hours(2 * detour_km * 1.3, to_row.get("altitude_m"))
+        if detour_km > EN_ROUTE_MAX_DETOUR_KM + 0.5:
+            problems.append(
+                f"Day {day.get('day')}: '{stop['sight']}' is {detour_km:.0f} km off the "
+                f"{transfer['from_city']} to {transfer['to_city']} road (limit {EN_ROUTE_MAX_DETOUR_KM:.0f} km)."
+            )
+        if not 0 < progress < 1:
+            problems.append(f"Day {day.get('day')}: '{stop['sight']}' is not between the two cities.")
+    visits = sum(float(stop["duration_hours"]) for stop in stops)
+    return detour_hours, visits, SIGHT_BUFFER_HOURS * len(stops), problems
+
+
 def _recompute_day(day: dict, dataset: Dataset) -> dict | None:
     """Recalculate a day's distances and hours from the sight coordinates."""
     city_row = dataset.city_row(day.get("city", ""))
     if city_row is None:
         return None
-    sights = day.get("sights", [])
+    detour_hours, en_route_visits, en_route_buffers, _ = _en_route_hours(day, dataset)
+    sights = [sight for sight in day.get("sights", []) if not sight.get("en_route")]
     if not sights:
-        return {"route_km": 0.0, "max_leg_km": 0.0, "local_travel_hours": 0.0,
-                "sightseeing_hours": 0.0, "buffer_hours": 0.0, "best_route_km": 0.0}
+        return {"route_km": 0.0, "max_leg_km": 0.0, "local_travel_hours": round(detour_hours, 2),
+                "sightseeing_hours": round(en_route_visits, 2), "buffer_hours": round(en_route_buffers, 2),
+                "best_route_km": 0.0}
     lats = [float(s["lat"]) for s in sights]
     lons = [float(s["lon"]) for s in sights]
     legs = [road_km(lats[i], lons[i], lats[i + 1], lons[i + 1]) for i in range(len(sights) - 1)]
@@ -224,9 +273,10 @@ def _recompute_day(day: dict, dataset: Dataset) -> dict | None:
     return {
         "route_km": sum(legs),
         "max_leg_km": max(legs) if legs else 0.0,
-        "local_travel_hours": local_travel_hours(sum(legs) + sum(hotel_legs), city_row.get("altitude_m")),
-        "sightseeing_hours": sum(float(s["duration_hours"]) for s in sights),
-        "buffer_hours": SIGHT_BUFFER_HOURS * len(sights),
+        # The day's driving is the city loop plus any detours taken during the transfer.
+        "local_travel_hours": local_travel_hours(sum(legs) + sum(hotel_legs), city_row.get("altitude_m")) + detour_hours,
+        "sightseeing_hours": sum(float(s["duration_hours"]) for s in sights) + en_route_visits,
+        "buffer_hours": SIGHT_BUFFER_HOURS * (len(sights) + round(en_route_buffers / SIGHT_BUFFER_HOURS)),
         "best_route_km": sum(best_legs),
     }
 
@@ -238,14 +288,18 @@ def _check_route_and_load(payload: dict, dataset: Dataset, pace: str, report: Va
     for day in payload.get("days", []):
         number = day.get("day")
         city = day.get("city", "")
-        sights = day.get("sights", [])
+        sights = [sight for sight in day.get("sights", []) if not sight.get("en_route")]
         city_row = dataset.city_row(city)
+        for problem in _en_route_hours(day, dataset)[3]:
+            report.critical("route_data", problem, "Only stops close to the road can be made during a transfer.", number)
         if city_row is None:
             report.critical("route_data", f"Day {number}: '{city}' is not in the cities sheet.",
                             "Add the city (with coordinates) or remove it from the request.", number)
             continue
 
-        for sight in sights:
+        for sight in day.get("sights", []):
+            if sight.get("en_route"):
+                continue  # measured against the road, not the city centre
             if sight.get("lat") is None or sight.get("lon") is None:
                 report.critical("route_data", f"Day {number}: '{sight['sight']}' has no coordinates.",
                                 "Fill lat/lon for this row in the sightseeing sheet.", number)

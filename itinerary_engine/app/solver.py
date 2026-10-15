@@ -14,6 +14,7 @@ import pandas as pd
 
 from .config import (
     ARRIVAL_OVERHEAD_HOURS,
+    TRAVEL_DAY_MAX_DRIVE_HOURS,
     BEST_TIME_ORDER,
     DEPARTURE_OVERHEAD_HOURS,
     MIN_DEPARTURE_BUFFER_HOURS,
@@ -57,6 +58,31 @@ class DaySlot:
     #: hours the day actually has.
     available_override: float | None = None
 
+    @property
+    def is_travel_day(self) -> bool:
+        """True when the drive alone fills the day, leaving no sightseeing hours."""
+        return bool(self.travel_only or (self.transfer is not None and not self.transfer.fits_one_day))
+
+    def day_allowance(self, pace: str) -> float:
+        """Hours the day can run to.
+
+        A day given over entirely to travel is not limited by the sightseeing pace: there
+        is nothing to pace. It can start at dawn and run as long as the drive needs, up to
+        TRAVEL_DAY_MAX_DRIVE_HOURS, so a 12h haul is one long travel day rather than an
+        impossible one.
+        """
+        allowance = pace_hours(pace)
+        if self.transfer is None or self.transfer.drive_hours is None:
+            return allowance
+        needed = self.transfer.drive_hours + TRANSFER_OVERHEAD_HOURS
+        if self.is_arrival:
+            needed += ARRIVAL_OVERHEAD_HOURS
+        if self.is_departure:
+            needed += self.departure_cost_hours
+        if needed <= allowance:
+            return allowance
+        return min(max(allowance, needed), TRAVEL_DAY_MAX_DRIVE_HOURS + TRANSFER_OVERHEAD_HOURS)
+
     def cost_breakdown(self, pace: str) -> dict[str, float]:
         """Where the day's hours go, for the response and for the validator."""
         transfer_hours = 0.0
@@ -69,7 +95,7 @@ class DaySlot:
         if self.is_departure:
             overhead += self.departure_cost_hours
         return {
-            "pace_allowance": pace_hours(pace),
+            "pace_allowance": self.day_allowance(pace),
             "intercity_travel": transfer_hours,
             "day_overheads": overhead,
         }
@@ -82,7 +108,7 @@ class DaySlot:
         """
         if self.available_override is not None:
             return max(0.0, round(self.available_override, 2))
-        if self.travel_only or (self.transfer is not None and not self.transfer.fits_one_day):
+        if self.is_travel_day:
             return 0.0
         costs = self.cost_breakdown(pace)
         hours = costs["pace_allowance"] - costs["intercity_travel"] - costs["day_overheads"]
@@ -321,12 +347,30 @@ def plan_city(
                 assignments.setdefault(int(day_number), []).insert(0, rows)
                 pinned_names |= set(rows["sight"])
 
+    # Day trips get a day of their own, but they must not take the last usable day away from
+    # the city's own must-visit stops. In Pangong Lake, four of the five rows are 40-180 km
+    # away: without this rule they claim the only free day and the lake itself -- the reason
+    # for the stop -- has nowhere to go.
+    def rank(row: pd.Series) -> tuple:
+        return (not bool(row["must_visit_flag"]), int(row["must_see_tier"]), int(row["priority"]))
+
     excursion_rows = [row for _, row in sort_by_priority(excursions).iterrows()] if not excursions.empty else []
-    for slot in by_capacity:
+    free_slots = [
+        slot for slot in by_capacity
+        if slot.transfer is None and not slot.is_arrival and not slot.is_departure and slot.available_hours(pace) > 0
+    ]
+    cluster_rank = min(
+        (rank(row) for cluster in clusters if not cluster.empty for _, row in cluster.iterrows()),
+        default=(True, 9, 99),
+    )
+    spare_days = max(0, len(free_slots) - len([c for c in clusters if not c.empty]))
+
+    for slot in free_slots:
         if not excursion_rows:
             break
-        if slot.transfer is not None or slot.is_arrival or slot.is_departure:
-            continue  # a day trip needs a full, free day
+        if spare_days <= 0 and rank(excursion_rows[0]) > cluster_rank:
+            break  # the city's own stops need this day more than the day trip does
+        spare_days -= 1
         assignments.setdefault(slot.day, []).append(excursion_rows.pop(0).to_frame().T)
 
     # Big-ticket sights (e.g. Rohtang Pass: 5h plus the drive) get a day built around them,

@@ -101,6 +101,12 @@ class SightOut(BaseModel):
     is_excursion: bool = False
     distance_from_centre_km: float = 0.0
     description: str | None = None
+    #: Set on stops made during an intercity drive rather than from the city's hotel.
+    en_route: bool = False
+    detour_km: float | None = None
+    detour_hours: float | None = None
+    along_route_percent: int | None = None
+    home_city: str | None = None
 
 
 class TransferOut(BaseModel):
@@ -115,6 +121,7 @@ class TransferOut(BaseModel):
     data_gap: bool = False
     travel_days_needed: int = 1
     is_overnight: bool = False
+    is_long_travel_day: bool = False
     notes: list[str] = []
 
 
@@ -139,6 +146,7 @@ class DayOut(BaseModel):
     sightseeing_hours: float
     buffer_hours: float
     local_travel_hours: float
+    en_route_hours: float = 0.0
     route_km: float
     max_leg_km: float
     sights: list[SightOut]
