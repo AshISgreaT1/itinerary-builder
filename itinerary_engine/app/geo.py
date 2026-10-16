@@ -25,6 +25,7 @@ from .config import (
     SPEED_CHECK_MIN_KM,
     TRANSFER_SPEED_KMPH,
 )
+from .roadcache import measured_km
 
 EARTH_RADIUS_KM = 6371.0
 
@@ -41,8 +42,22 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 def road_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Approximate road distance: straight line inflated by a detour factor."""
+    """Road distance in km: measured where it has been measured, estimated otherwise.
+
+    The measured value comes from the OSRM cache (``python -m app.osrm --build``). Without
+    that cache -- the default -- this is the old straight line inflated by a detour factor,
+    so the engine behaves exactly as it did before. Use :func:`road_km_is_measured` to tell
+    the two apart; nothing reports an estimate as though it were measured.
+    """
+    measured = measured_km(lat1, lon1, lat2, lon2)
+    if measured is not None:
+        return measured
     return haversine_km(lat1, lon1, lat2, lon2) * ROAD_DISTANCE_FACTOR
+
+
+def road_km_is_measured(lat1: float, lon1: float, lat2: float, lon2: float) -> bool:
+    """True when this pair's distance came from the routing engine, not the estimate."""
+    return measured_km(lat1, lon1, lat2, lon2) is not None
 
 
 def local_speed_kmph(altitude_m: float | None) -> float:

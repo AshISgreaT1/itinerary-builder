@@ -20,8 +20,13 @@ from .config import (
     MIN_DEPARTURE_BUFFER_HOURS,
     MAX_DAY_ROUTE_KM,
     MAX_LEG_KM,
+    EXTRA_HOURS_PER_STOP,
     MAX_SIGHTS_PER_DAY,
+    ARRIVAL_DAY_MAX_KM,
+    HARD_TIME_SLOTS,
+    LATEST_END_HOUR,
     MAX_STOPS_WITH_EXCURSION,
+    TIME_WINDOWS,
     PACE_ACTIVE_HOURS,
     SIGHT_BUFFER_HOURS,
     TRANSFER_OVERHEAD_HOURS,
@@ -48,6 +53,8 @@ class DaySlot:
     centre_lon: float
     altitude_m: float | None = None
     transfer: RouteLeg | None = None
+    #: Ordering habits mined from past itineraries; used only to settle ties.
+    order_patterns: object | None = None
     is_arrival: bool = False
     is_departure: bool = False
     #: Checkout + transfer to the airport/station + reporting buffer, set by the builder.
@@ -57,6 +64,8 @@ class DaySlot:
     #: Budget taken straight from an existing plan, so edits are judged against the same
     #: hours the day actually has.
     available_override: float | None = None
+    #: Hours the user chose to add to this day on top of the pace allowance.
+    extra_hours: float = 0.0
 
     @property
     def is_travel_day(self) -> bool:
@@ -107,21 +116,28 @@ class DaySlot:
         sightseeing hours at all -- the engine will not quietly schedule sights into it.
         """
         if self.available_override is not None:
-            return max(0.0, round(self.available_override, 2))
+            return max(0.0, round(self.available_override + self.extra_hours, 2))
         if self.is_travel_day:
             return 0.0
         costs = self.cost_breakdown(pace)
         hours = costs["pace_allowance"] - costs["intercity_travel"] - costs["day_overheads"]
         if self.is_departure:
             hours -= MIN_DEPARTURE_BUFFER_HOURS
-        return max(0.0, round(hours, 2))
+        # The traveller can choose a longer day than the pace suggests; the clock still has
+        # to fit it before LATEST_END_HOUR, so this buys sights, not miracles.
+        return max(0.0, round(hours + self.extra_hours, 2))
 
     def max_sights(self, pace: str) -> int:
-        """Stop count cap; shortened days also get fewer stops."""
+        """Stop count cap: shortened days get fewer stops, lengthened ones get more.
+
+        The cap exists so a day is not diced into six twenty-minute visits. A traveller who
+        asks for two extra hours has said they want a fuller day, so the cap moves with the
+        hours -- one more stop for every two hours added.
+        """
         cap = MAX_SIGHTS_PER_DAY[pace.strip().lower()]
         if self.transfer is not None or self.is_arrival or self.is_departure:
             cap = max(1, cap - 2)
-        return cap
+        return cap + int(self.extra_hours // EXTRA_HOURS_PER_STOP)
 
 
 @dataclass
@@ -180,8 +196,8 @@ def _day_metrics(selected: pd.DataFrame, slot: DaySlot) -> tuple[float, float, f
     lats, lons = selected["lat"].tolist(), selected["lon"].tolist()
     legs = [road_km(lats[i], lons[i], lats[i + 1], lons[i + 1]) for i in range(len(selected) - 1)]
     hotel_legs = [
-        road_km(slot.centre_lat, slot.centre_lon, lats[0], lons[0]),
-        road_km(slot.centre_lat, slot.centre_lon, lats[-1], lons[-1]),
+        road_km(slot.centre_lat, slot.centre_lon, lats[0], lons[0]),   # out to the first stop
+        road_km(lats[-1], lons[-1], slot.centre_lat, slot.centre_lon),  # and back from the last
     ]
     total_km = sum(legs) + sum(hotel_legs)
     hours = local_travel_hours(total_km, slot.altitude_m)
@@ -203,9 +219,38 @@ def _ordered(candidate: pd.DataFrame, slot: DaySlot) -> pd.DataFrame:
         group = frame[frame["_time_rank"] == rank].reset_index(drop=True)
         order = order_by_route(group, cursor_lat, cursor_lon)
         routed = group.iloc[order].reset_index(drop=True)
+        routed = _apply_learned_order(routed, slot)
         ordered_parts.append(routed)
         cursor_lat, cursor_lon = float(routed.iloc[-1]["lat"]), float(routed.iloc[-1]["lon"])
     return pd.concat(ordered_parts, ignore_index=True).drop(columns="_time_rank")
+
+
+def _apply_learned_order(group: pd.DataFrame, slot: DaySlot) -> pd.DataFrame:
+    """Swap neighbouring stops to match past itineraries, when the driving does not suffer.
+
+    Geography and time of day decide the shape of the day; this only settles ties inside a
+    single time slot, and a swap is kept only when it costs no extra driving.
+    """
+    patterns = slot.order_patterns
+    if patterns is None or len(group) < 2:
+        return group
+
+    def driving_km(frame: pd.DataFrame) -> float:
+        lats, lons = frame["lat"].tolist(), frame["lon"].tolist()
+        legs = [road_km(lats[i], lons[i], lats[i + 1], lons[i + 1]) for i in range(len(frame) - 1)]
+        return road_km(slot.centre_lat, slot.centre_lon, lats[0], lons[0]) + sum(legs)
+
+    ordered = group
+    for index in range(len(ordered) - 1):
+        first, second = ordered.iloc[index], ordered.iloc[index + 1]
+        if not patterns.prefers(second["sight_key"], first["sight_key"]):
+            continue
+        positions = list(range(len(ordered)))
+        positions[index], positions[index + 1] = positions[index + 1], positions[index]
+        candidate = ordered.iloc[positions].reset_index(drop=True)
+        if driving_km(candidate) <= driving_km(ordered) + 1e-9:
+            ordered = candidate
+    return ordered.reset_index(drop=True)
 
 
 def evaluate_day(sights: pd.DataFrame, slot: DaySlot, pace: str) -> dict:
@@ -228,6 +273,17 @@ def evaluate_day(sights: pd.DataFrame, slot: DaySlot, pace: str) -> dict:
     excursions = int(ordered["is_excursion"].sum()) if "is_excursion" in ordered else 0
 
     blockers: list[str] = []
+    if slot.is_departure and excursions:
+        blockers.append("a day trip out of town cannot share the departure day with the onward journey")
+    hard_slot_problem = hard_slot_blocker(ordered, slot)
+    if hard_slot_problem and not ("_forced" in ordered and ordered["_forced"].any()):
+        blockers.append(hard_slot_problem)
+    if slot.is_arrival:
+        for name in _far_from_centre(ordered):
+            blockers.append(
+                f"'{name}' is {float(ordered.loc[ordered['sight'] == name, 'distance_from_centre_km'].iloc[0]):.0f} km "
+                f"from the centre, too far for the arrival day (limit {ARRIVAL_DAY_MAX_KM:.0f} km)"
+            )
     if needed > budget:
         blockers.append(
             f"needs {needed:.1f}h but the day has {budget:.1f}h "
@@ -254,6 +310,61 @@ def evaluate_day(sights: pd.DataFrame, slot: DaySlot, pace: str) -> dict:
     }
 
 
+def _far_from_centre(sights: pd.DataFrame) -> list[str]:
+    """Sights too far out for an arrival day, by name.
+
+    Day 1 is short, and the traveller has just spent it travelling: the agent itineraries
+    keep it in town (see ``ARRIVAL_DAY_MAX_KM``). A distant sight is not dropped, only
+    deferred -- :func:`plan_city` places it on a later day.
+    """
+    if sights.empty or "distance_from_centre_km" not in sights:
+        return []
+    far = sights[sights["distance_from_centre_km"].astype(float) > ARRIVAL_DAY_MAX_KM]
+    if "_forced" in far.columns:
+        far = far[~far["_forced"].fillna(False).astype(bool)]  # an explicit pin outranks the habit
+    return [str(name) for name in far["sight"]]
+
+
+def _is_pinned(row: pd.Series) -> bool:
+    """Did the user put this sight on this day by hand?"""
+    return bool(row.get("_forced", False)) and not pd.isna(row.get("_forced_day", float("nan")))
+
+
+def hard_slot_blocker(sights: pd.DataFrame, slot: DaySlot) -> str | None:
+    """Why this day cannot honour the hard slots it is being asked to hold, if it cannot.
+
+    Evening and sunset are constraints: every such sight has to happen between 16:30 and
+    the end of its window. That window is only three and a half hours long, so a day can
+    hold one or two of them, not four -- and a departure day, which owes its evening to the
+    onward journey, can hold none at all. Catching it here keeps the clock from having to
+    throw the sight out later.
+    """
+    if sights.empty or "best_time" not in sights:
+        return None
+    hard = sights[sights["best_time"].astype(str).str.strip().str.lower().isin(HARD_TIME_SLOTS)]
+    if hard.empty:
+        return None
+    slots = {str(value).strip().lower() for value in hard["best_time"]}
+    window_start = max(TIME_WINDOWS[name][0] for name in slots)
+    window_end = min(TIME_WINDOWS[name][1] for name in slots)
+    # The onward journey still has to happen, so a departure day's evening is already spoken for.
+    latest = LATEST_END_HOUR - (slot.departure_cost_hours if slot.is_departure else 0.0)
+    end = min(window_end, latest)
+    needed = float(hard["duration_hours"].sum()) + SIGHT_BUFFER_HOURS * len(hard)
+    if window_start + needed <= end + 1e-9:
+        return None
+    names = ", ".join(f"'{name}'" for name in hard["sight"])
+    if end <= window_start:
+        return (f"{names} must be seen after {_clock(window_start)}, which this day owes to the "
+                f"onward journey")
+    return (f"{names} need {needed:.1f}h inside {_clock(window_start)}-{_clock(end)}, "
+            f"which is only {end - window_start:.1f}h long")
+
+
+def _clock(hours: float) -> str:
+    return f"{int(hours):02d}:{int(round((hours % 1) * 60)):02d}"
+
+
 def pack_day(candidates: pd.DataFrame, slot: DaySlot, pace: str) -> PackedDay:
     """Fill one day from its cluster, respecting time, stop count and distance limits.
 
@@ -277,6 +388,12 @@ def pack_day(candidates: pd.DataFrame, slot: DaySlot, pace: str) -> PackedDay:
         buffer_hours = SIGHT_BUFFER_HOURS * len(trial)
         excursions = int(trial["is_excursion"].sum()) if "is_excursion" in trial else 0
 
+        if slot.is_arrival and _far_from_centre(trial):
+            continue  # the arrival day stays in town
+        if slot.is_departure and excursions:
+            continue  # you cannot spend the last morning an hour out of town
+        if hard_slot_blocker(trial, slot) and not _is_pinned(row):
+            continue  # an evening sight belongs on a day that can give it the evening
         if visit_hours + buffer_hours + travel_hours > budget:
             continue
         if max_leg > MAX_LEG_KM or route_km_total > MAX_DAY_ROUTE_KM:
@@ -390,6 +507,26 @@ def plan_city(
         anchored.add(big[0]["sight"])
 
     available_clusters = [i for i, cluster in enumerate(clusters) if not cluster.empty]
+
+    # The arrival day gets the headline cluster. In the agent itineraries 85% of day-1 stops
+    # are must-visits against 47% later on: the first day is when the city's famous sights
+    # are seen, not what is left over. Capacity order alone did the opposite, because the
+    # arrival day has the fewest hours and so chose last.
+    arrival = next((slot for slot in by_capacity
+                    if slot.is_arrival and slot.day not in assignments and slot.available_hours(pace) > 0), None)
+    if arrival is not None and available_clusters:
+        def headline(index: int) -> tuple:
+            cluster = clusters[index]
+            in_town = cluster[cluster["distance_from_centre_km"] <= ARRIVAL_DAY_MAX_KM]                 if "distance_from_centre_km" in cluster else cluster
+            return (int(in_town["must_visit_flag"].sum()),
+                    -float(in_town["must_see_tier"].mean()) if not in_town.empty else -9.0,
+                    -float(in_town["priority"].min()) if not in_town.empty else -99.0)
+
+        best = max(available_clusters, key=headline)
+        if headline(best)[0] > 0:  # only worth claiming the day if it really holds must-visits
+            available_clusters.remove(best)
+            assignments[arrival.day] = [clusters[best]]
+
     for slot in by_capacity:
         if not available_clusters or slot.day in assignments:
             continue

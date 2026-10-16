@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -56,6 +57,30 @@ def parse_open_months(value: object) -> frozenset[int]:
         return frozenset(list(range(start, 13)) + list(range(1, end + 1)))  # wraps the new year
     logger.warning("Could not parse month window %r; treating as open all year", value)
     return frozenset(ALL_MONTHS)
+
+
+def parse_clock(value: object) -> float | None:
+    """``"09:30"`` / ``"9.30 am"`` / ``"17:00"`` -> hours as a float, or None when absent.
+
+    The sample workbook leaves opening_time and closing_time empty; when a team fills them
+    in, the scheduler treats them as hard limits. Nothing is assumed in the meantime.
+    """
+    text = str(value or "").strip().lower()
+    if not text or text in {"nan", "-", "none"}:
+        return None
+    match = re.match(r"^(\d{1,2})[:.·](\d{2})\s*(am|pm)?$", text) or re.match(r"^(\d{1,2})\s*(am|pm)$", text)
+    if not match:
+        return None
+    groups = match.groups()
+    hour = int(groups[0])
+    minute = int(groups[1]) if len(groups) == 3 and groups[1] and groups[1].isdigit() else 0
+    meridiem = groups[-1]
+    if meridiem == "pm" and hour < 12:
+        hour += 12
+    if meridiem == "am" and hour == 12:
+        hour = 0
+    total = hour + minute / 60
+    return total if 0 <= total <= 24 else None
 
 
 def _split_aliases(value: object) -> set[str]:
@@ -166,6 +191,9 @@ def _clean_sights(frame: pd.DataFrame) -> pd.DataFrame:
             sights[column] = pd.to_numeric(sights[column], errors="coerce")
 
     sights["must_visit_flag"] = _column(sights, "must_visit", "no").astype(str).str.lower().eq("yes")
+    # Real opening hours when the dataset has them; None (and a reported gap) when it does not.
+    sights["opens_at"] = _column(sights, "opening_time", None).map(parse_clock)
+    sights["closes_at"] = _column(sights, "closing_time", None).map(parse_clock)
     sights["best_time"] = _column(sights, "best_time", "any").fillna("any").astype(str).str.lower()
     sights["zone"] = _column(sights, "zone", "").fillna("").astype(str)
     sights["visit_type"] = _column(sights, "visit_type", "").fillna("").astype(str)

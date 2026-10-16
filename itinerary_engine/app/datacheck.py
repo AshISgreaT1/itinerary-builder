@@ -209,6 +209,40 @@ def missing_transfer_distances(dataset: Dataset) -> list[Finding]:
     ]
 
 
+def coordinates_far_from_any_road(dataset: Dataset) -> list[Finding]:
+    """Sights whose coordinates OSRM had to move a long way to reach a road.
+
+    Built from the distance cache, so it only reports what was actually measured. A big
+    snap means the coordinate is wrong or too coarse -- several Ladakh rows are rounded to
+    one decimal place (33.2, 78.5), which is about 11 km of slack -- and every distance
+    computed from it inherits that error.
+    """
+    from .roadcache import snap_warnings
+
+    findings = []
+    for warning in snap_warnings():
+        lat, _, lon = warning["point"].partition(",")
+        findings.append(
+            Finding("warning", "coordinate_far_from_road",
+                    _name_at(dataset, float(lat), float(lon)) or warning["key"],
+                    f"{warning['km']:.1f} km from the nearest road at {warning['point']}",
+                    "check the latitude and longitude; a coordinate rounded to one decimal place "
+                    "is about 11 km of slack")
+        )
+    return findings
+
+
+def _name_at(dataset: Dataset, lat: float, lon: float) -> str | None:
+    """"City / Sight" for a coordinate, or "City" when it is a city centre."""
+    for _, row in dataset.sights.iterrows():
+        if abs(float(row["lat"]) - lat) < 5e-5 and abs(float(row["lon"]) - lon) < 5e-5:
+            return f"{row['city']} / {row['sight']}"
+    for _, row in dataset.cities.dropna(subset=["lat", "lon"]).iterrows():
+        if abs(float(row["lat"]) - lat) < 5e-5 and abs(float(row["lon"]) - lon) < 5e-5:
+            return f"{row['city']} (city centre)"
+    return None
+
+
 def run_checks(dataset: Dataset) -> list[Finding]:
     """Every check, worst first."""
     findings = (
@@ -218,6 +252,7 @@ def run_checks(dataset: Dataset) -> list[Finding]:
         + duplicate_city_sight_names(dataset)
         + route_gaps(dataset)
         + missing_transfer_distances(dataset)
+        + coordinates_far_from_any_road(dataset)
     )
     order = {"error": 0, "warning": 1}
     return sorted(findings, key=lambda f: (order[f.severity], f.kind, f.key))

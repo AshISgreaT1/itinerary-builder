@@ -20,7 +20,7 @@ from .clustering import mark_excursions
 from .config import SIGHT_BUFFER_HOURS
 from .data_loader import Dataset
 from .normalization import normalize_key
-from .geo import RouteLeg
+from .geo import RouteLeg, local_travel_hours, road_km
 from .solver import DaySlot, evaluate_day, pace_hours
 
 ACTIONS = ("add", "replace", "remove")
@@ -206,8 +206,36 @@ def placement_options(payload: dict, dataset: Dataset, sight: str, city: str | N
         "duration_hours": float(row["duration_hours"]),
         "must_visit": bool(row["must_visit_flag"]),
         "best_day": best,
+        "needs_more_than_a_day": _too_big_for_any_day(options, row, dataset, pace),
         "options": options,
     }
+
+
+def _too_big_for_any_day(options: list[dict], row: pd.Series, dataset: Dataset, pace: str) -> str | None:
+    """Say so when the sight cannot fit *any* day, even an empty one.
+
+    Rohtang Pass is 61 km of mountain road out of Manali: 5h at the pass plus 5.6h of
+    driving is more than an active day holds, so no amount of dropping other stops helps.
+    Without this the caller is told only that every day is full, which reads as a packing
+    problem when it is not one.
+    """
+    if not options or any(option["fits"] or option["replace_options"] or option["fits_if_dropped"]
+                          for option in options):
+        return None
+    city_row = dataset.city_row(str(row["city"]))
+    if city_row is None:
+        return None
+    out = road_km(float(city_row["lat"]), float(city_row["lon"]), float(row["lat"]), float(row["lon"]))
+    back = road_km(float(row["lat"]), float(row["lon"]), float(city_row["lat"]), float(city_row["lon"]))
+    driving = local_travel_hours(out + back, city_row.get("altitude_m"))
+    alone = float(row["duration_hours"]) + SIGHT_BUFFER_HOURS + driving
+    longest = max(option["available_hours"] for option in options)
+    if alone <= longest:
+        return None
+    return (f"'{row['sight']}' needs {alone:.1f}h on its own ({float(row['duration_hours']):.1f}h at the sight "
+            f"plus {driving:.1f}h driving {out:.0f} km each way), which is more than the longest day on this "
+            f"trip ({longest:.1f}h). Dropping other stops will not make room: it needs a faster pace, or a "
+            f"trip that gives it a day of its own.")
 
 
 def _describe_alternatives(options: dict) -> list[dict]:

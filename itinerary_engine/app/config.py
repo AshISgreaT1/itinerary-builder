@@ -6,6 +6,8 @@ changed without touching the logic.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Final
 
 # --- Pace: total active sightseeing hours available per day -------------------------
@@ -78,6 +80,14 @@ MIN_DEPARTURE_BUFFER_HOURS: Final[float] = 0.5
 # --- Local (intra-city) travel ------------------------------------------------------
 #: Straight-line km are multiplied by this to approximate road distance.
 ROAD_DISTANCE_FACTOR: Final[float] = 1.3
+
+#: Where measured road distances live, when they have been built (see ``app/osrm.py``).
+#: Absent by default: without it every distance is the straight-line estimate above.
+ROAD_CACHE_PATH: Final[Path] = Path(os.environ.get("ITINERARY_ROAD_CACHE", "data/road_distances.json"))
+#: OSRM's default ``max-table-size``; a larger matrix needs the server started with more.
+OSRM_MAX_TABLE_LOCATIONS: Final[int] = 100
+#: A coordinate this far from the nearest road is reported: the measurement is suspect.
+OSRM_SNAP_WARN_KM: Final[float] = 2.0
 #: Average local driving speed (km/h); hill roads are slower.
 LOCAL_SPEED_KMPH: Final[float] = 28.0
 LOCAL_SPEED_KMPH_HILLS: Final[float] = 22.0
@@ -93,8 +103,17 @@ MAX_LEG_KM: Final[float] = 30.0
 MAX_DAY_ROUTE_KM: Final[float] = 70.0
 #: A sight this far from the city centre is a day-trip excursion, not a city stop.
 EXCURSION_KM: Final[float] = 35.0
+#: How far from the city centre a sight may be on the arrival day.
+#:
+#: Measured from the 1 241 agent-written days in the workbook: day 1 has a median of 4.0 km
+#: from the centre and a 90th percentile of 23.2 km, and only 1.0% of its stops are 35 km or
+#: more out (against 18.3% on later days). Arrival days are short and the traveller has just
+#: travelled, so the agents keep day 1 in town; 25 km keeps 93% of what they actually did.
+ARRIVAL_DAY_MAX_KM: Final[float] = 25.0
 #: How many ordinary stops may share a day with an excursion.
 MAX_STOPS_WITH_EXCURSION: Final[int] = 2
+#: Hours a user must add to a day before it may hold one more stop than the pace allows.
+EXTRA_HOURS_PER_STOP: Final[float] = 2.0
 #: A sight farther than this from its city centre is almost certainly filed under the
 #: wrong city (e.g. "sunset point" sitting 315 km from Jaisalmer).
 WRONG_CITY_KM: Final[float] = 120.0
@@ -102,6 +121,49 @@ WRONG_CITY_KM: Final[float] = 120.0
 SAME_PLACE_KM: Final[float] = 0.05
 #: ...or this close when one name contains the other.
 SAME_PLACE_NAME_KM: Final[float] = 1.0
+
+# --- Clock schedule -----------------------------------------------------------------
+# The dataset has no opening_time/closing_time, and the agent itineraries carry no clock
+# times, so these windows are the engine's own stated assumption -- reported with every
+# schedule rather than passed off as data.
+DAY_START_HOUR: Final[float] = 9.0          # a normal sightseeing day begins
+TRANSFER_START_HOUR: Final[float] = 8.0     # driving days leave earlier
+LATEST_END_HOUR: Final[float] = 20.0        # past this a day is no longer realistic
+#: When each ``best_time`` value can be visited (24h clock).
+TIME_WINDOWS: Final[dict[str, tuple[float, float]]] = {
+    "morning": (8.0, 12.5),
+    "afternoon": (12.5, 16.5),
+    "evening": (16.5, 20.0),
+    "sunset": (16.5, 19.5),
+    "any": (8.0, 20.0),
+}
+#: Slots that are genuinely time-critical: a sunset point at 10:00 is simply wrong.
+HARD_TIME_SLOTS: Final[frozenset[str]] = frozenset({"sunset", "evening"})
+#: Soft slots only complain when a visit lands in the wrong half of the day. Nearly half
+#: the dataset is marked "morning", so no day could honour them all literally.
+MORNING_LATEST_START: Final[float] = 14.0
+AFTERNOON_EARLIEST_START: Final[float] = 11.0
+AFTERNOON_LATEST_START: Final[float] = 18.0
+#: Longest the plan will have someone wait for a sunset/evening slot. Beyond this the wait
+#: is not worth it: the sight is visited early and the clash is reported instead.
+MAX_WAIT_HOURS: Final[float] = 2.5
+#: How many times one plan may be re-planned to rescue a sight that missed its slot.
+MAX_SLOT_REPAIRS: Final[int] = 2
+#: How many sights one plan may re-home or drop before it stops trying. Each round is a
+#: full re-plan, and every round either places a sight or removes one, so this terminates.
+MAX_SLOT_ROUNDS: Final[int] = 6
+
+#: Slack allowed before a hard slot counts as missed.
+TIME_WINDOW_GRACE_HOURS: Final[float] = 0.5
+
+#: Lunch: taken once, when the day crosses this window.
+LUNCH_WINDOW: Final[tuple[float, float]] = (12.5, 14.0)
+LUNCH_HOURS: Final[float] = 1.0
+#: A short rest once the day has been going this long, and how long it lasts.
+BREAK_AFTER_HOURS: Final[float] = 4.0
+BREAK_HOURS: Final[float] = 0.25
+#: Hotel check-in after arriving in a new city.
+CHECK_IN_HOURS: Final[float] = 0.5
 
 # --- Ordering -----------------------------------------------------------------------
 #: Sort order inside a day: morning sights first, sunset/evening last.

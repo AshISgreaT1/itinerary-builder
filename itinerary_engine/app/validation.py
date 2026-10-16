@@ -15,7 +15,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .config import (
+    ARRIVAL_DAY_MAX_KM,
     BEST_TIME_ORDER,
+    EXTRA_HOURS_PER_STOP,
+    HARD_TIME_SLOTS,
+    TIME_WINDOW_GRACE_HOURS,
     EN_ROUTE_MAX_DETOUR_KM,
     MAX_DAY_ROUTE_KM,
     MAX_LEG_KM,
@@ -32,8 +36,11 @@ from .config import (
 from .data_loader import Dataset
 from .geo import local_travel_hours, order_by_route, point_to_segment_km, road_km
 from .normalization import names_contain, normalize_key
+from .patterns import patterns_for
+from .schedule import schedule_conflicts, window_for
 
 CATEGORIES = (
+    "schedule",
     "travel_feasibility",
     "route_data",
     "time_and_activity_load",
@@ -47,6 +54,8 @@ CATEGORIES = (
 
 #: Hour/km tolerance when comparing the planner's numbers with recomputed ones.
 TOLERANCE_HOURS = 0.05
+#: Two stops this close are the same place whatever they are called or filed under.
+SAME_PLACE_KM = 1.0
 TOLERANCE_KM = 0.5
 #: A day's route may exceed the best possible order by this much before it is reported.
 ROUTE_ORDER_SLACK = 1.25
@@ -246,8 +255,8 @@ def _recompute_day(day: dict, dataset: Dataset) -> dict | None:
     lons = [float(s["lon"]) for s in sights]
     legs = [road_km(lats[i], lons[i], lats[i + 1], lons[i + 1]) for i in range(len(sights) - 1)]
     hotel_legs = [
-        road_km(float(city_row["lat"]), float(city_row["lon"]), lats[0], lons[0]),
-        road_km(float(city_row["lat"]), float(city_row["lon"]), lats[-1], lons[-1]),
+        road_km(float(city_row["lat"]), float(city_row["lon"]), lats[0], lons[0]),   # out
+        road_km(lats[-1], lons[-1], float(city_row["lat"]), float(city_row["lon"])),  # and back
     ]
     # The best order the planner could legitimately use: time-of-day groups in order, each
     # group routed optimally. Comparing against an unconstrained optimum would penalise a
@@ -351,20 +360,42 @@ def _check_route_and_load(payload: dict, dataset: Dataset, pace: str, report: Va
                 "Re-run the plan; the reported total does not match its own components.",
                 number,
             )
-        if available > allowance + TOLERANCE_HOURS:
+        extra = float((day.get("time_budget") or {}).get("extra_hours", 0.0))
+        if available > allowance + extra + TOLERANCE_HOURS:
             report.critical(
                 "time_and_activity_load",
-                f"Day {number}: {available:.1f}h available exceeds the {allowance:.1f}h {pace} allowance.",
+                f"Day {number}: {available:.1f}h available exceeds the {allowance:.1f}h {pace} allowance"
+                + (f" plus the {extra:.1f}h you added." if extra else "."),
                 "The day budget is wrong; check the pace and the day overheads.",
                 number,
             )
-        if len(sights) > cap:
+        elif extra:
+            report.note(
+                "time_and_activity_load",
+                f"Day {number} runs {extra:.1f}h longer than the {pace} pace by your choice "
+                f"({available:.1f}h of sightseeing).",
+                number,
+            )
+        if len(sights) > cap + int(extra // EXTRA_HOURS_PER_STOP):
             report.critical(
                 "time_and_activity_load",
                 f"Day {number}: {len(sights)} stops is more than the {cap} a {pace} day allows.",
                 "Remove the lowest-priority stops or use a faster pace.",
                 number,
             )
+
+        # The arrival day stays in town: see ARRIVAL_DAY_MAX_KM for the evidence.
+        if day.get("is_arrival_day"):
+            for sight in sights:
+                distance = float(sight.get("distance_from_centre_km") or 0.0)
+                if distance > ARRIVAL_DAY_MAX_KM:
+                    report.warn(
+                        "destination_and_logic",
+                        f"Day {number}: '{sight['sight']}' is {distance:.0f} km from the centre of {city} on the "
+                        f"arrival day (past the {ARRIVAL_DAY_MAX_KM:.0f} km the past itineraries keep to).",
+                        "Move it to a later day, unless the arrival time makes it worth the drive.",
+                        number,
+                    )
 
         # Geometry limits.
         for first, second in zip(sights, sights[1:]):
@@ -532,10 +563,15 @@ def _check_duplicates_and_logic(payload: dict, dataset: Dataset, report: Validat
             key = normalize_key(sight["sight"])
             canonical = normalize_key(dataset.dedup.resolve(city, sight["sight"]))
             for prev_city, prev_key, prev_lat, prev_lon, prev_day in seen:
-                same_name = prev_key == key or normalize_key(dataset.dedup.resolve(prev_city, prev_key)) == canonical
+                apart_km = road_km(prev_lat, prev_lon, float(sight["lat"]), float(sight["lon"]))
+                # Jaipur and Udaipur both have a City Palace, and they are 400 km apart: a
+                # shared name only means a repeat within one city, or at the same spot.
+                same_place = prev_city == city_key or apart_km <= SAME_PLACE_KM
+                shares_name = prev_key == key or normalize_key(dataset.dedup.resolve(prev_city, prev_key)) == canonical
+                same_name = shares_name and same_place
                 same_spot = (
                     prev_city == city_key
-                    and road_km(prev_lat, prev_lon, float(sight["lat"]), float(sight["lon"])) <= 0.05
+                    and apart_km <= 0.05
                     and (names_contain(prev_key, key) or prev_key == key)
                 )
                 if same_name or same_spot:
@@ -582,6 +618,204 @@ def _check_duplicates_and_logic(payload: dict, dataset: Dataset, report: Validat
             )
 
 
+def _clock(hours: float) -> str:
+    return f"{int(hours):02d}:{int(round((hours % 1) * 60)):02d}"
+
+
+def _clock_hours(text: str | None) -> float:
+    hours, _, minutes = str(text or "0:00").partition(":")
+    return int(hours) + int(minutes or 0) / 60.0
+
+
+def _check_schedule(payload: dict, dataset: Dataset, report: ValidationReport) -> None:
+    """The clock schedule: blocks in order, preferred times honoured, nothing past the limit.
+
+    Time-of-day problems are warnings, not blockers: a sight visited outside its preferred
+    window is a worse trip, not an impossible one. Overlapping blocks are a different
+    matter -- that would be the engine contradicting itself.
+    """
+    patterns = patterns_for(dataset)
+    for day in payload.get("days", []):
+        number = day.get("day")
+        schedule = day.get("schedule") or {}
+        blocks = schedule.get("blocks", [])
+        if not blocks:
+            if day.get("sights"):
+                report.critical("schedule", f"Day {number}: sights are planned but the day has no schedule.",
+                                "Re-run the plan; the schedule failed to build.", number)
+            continue
+
+        previous_end = None
+        for block in blocks:
+            if previous_end is not None and block["start"] < previous_end:
+                report.critical(
+                    "schedule",
+                    f"Day {number}: '{block['label']}' starts at {block['start']} before the previous block ends "
+                    f"at {previous_end}.",
+                    "Re-run the plan; the day's blocks overlap.",
+                    number,
+                )
+            previous_end = block["end"]
+
+        scheduled_sights = [block["sight"] for block in blocks if block["kind"] == "sight"]
+        if len(scheduled_sights) != len(set(scheduled_sights)):
+            report.critical("schedule", f"Day {number}: a sight appears twice in the day's schedule.",
+                            "Remove the repeat.", number)
+        if len(scheduled_sights) != len(day.get("sights", [])):
+            report.critical(
+                "schedule",
+                f"Day {number}: the schedule shows {len(scheduled_sights)} stops but the day lists "
+                f"{len(day.get('sights', []))}.",
+                "Re-run the plan; the schedule and the day disagree.",
+                number,
+            )
+
+        # The header must say what the clock says. A day whose reported hours drift from
+        # its own blocks is the defect that makes every other number untrustworthy.
+        totals = schedule.get("totals") or {}
+        span = float(schedule.get("span_hours") or 0.0)
+        accounted = float(schedule.get("accounted_hours") or 0.0)
+        if abs(accounted - span) > 0.02:
+            report.critical(
+                "time_and_activity_load",
+                f"Day {number}: the blocks account for {accounted:.2f}h but the day spans {span:.2f}h "
+                f"({schedule.get('starts')}-{schedule.get('ends')}).",
+                "Re-run the plan; the schedule has an unexplained gap.",
+                number,
+            )
+        activity = float(schedule.get("activity_hours") or 0.0)
+        parts = (float(totals.get("sightseeing", 0.0)) + float(totals.get("local_travel", 0.0))
+                 + float(totals.get("stop_buffers", 0.0)))
+        if abs(activity - parts) > 0.02:
+            report.critical(
+                "time_and_activity_load",
+                f"Day {number}: activity is reported as {activity:.2f}h but sightseeing, local travel and "
+                f"buffers come to {parts:.2f}h.",
+                "Re-run the plan; the day's totals do not add up.",
+                number,
+            )
+        if abs(float(day.get("used_hours", 0.0)) - activity) > 0.02:
+            report.critical(
+                "time_and_activity_load",
+                f"Day {number}: the day reports {float(day.get('used_hours', 0.0)):.2f}h used but its schedule "
+                f"fills {activity:.2f}h.",
+                "Re-run the plan; the day's total and its schedule disagree.",
+                number,
+            )
+        for field, value in (("sightseeing_hours", totals.get("sightseeing")),
+                             ("buffer_hours", totals.get("stop_buffers")),
+                             ("local_travel_hours", totals.get("local_travel"))):
+            if value is not None and abs(float(day.get(field, 0.0)) - float(value)) > 0.02:
+                report.critical(
+                    "time_and_activity_load",
+                    f"Day {number}: {field} says {float(day.get(field, 0.0)):.2f}h but the schedule contains "
+                    f"{float(value):.2f}h.",
+                    "Re-run the plan; the day's breakdown and its schedule disagree.",
+                    number,
+                )
+        # The intercity block is the longest single number in the day: check it against the table.
+        transfer = day.get("transfer") or {}
+        booked = transfer.get("drive_hours")
+        planned = float(totals.get("intercity_travel", 0.0))
+        if booked is not None and planned and abs(planned - float(booked)) > 0.1:
+            report.critical(
+                "travel_feasibility",
+                f"Day {number}: the schedule allows {planned:.2f}h for the drive to {day.get('city')} but the "
+                f"route says {float(booked):.2f}h.",
+                "Re-run the plan; the schedule and the route disagree on the drive.",
+                number,
+            )
+
+        # A sight placed outside a hard slot is allowed, but never without a way out.
+        offered = {entry.get("sight") for entry in schedule.get("alternatives", [])}
+        for entry in schedule.get("alternatives", []):
+            report.warn(
+                "schedule",
+                f"Day {number}: '{entry.get('sight')}' {entry.get('problem')}.",
+                entry.get("suggestion") or "Move it to another day.",
+                number,
+            )
+        # The hard slot, enforced. An evening or sunset sight is visited inside its window
+        # or it is not visited at all -- there is no "close enough", and no grace here: a
+        # schedule that starts one before 16:30 is rejected outright.
+        for sight in day.get("sights", []):
+            slot = str(sight.get("best_time", "")).strip().lower()
+            if slot not in HARD_TIME_SLOTS:
+                continue
+            block = next((item for item in blocks
+                          if item["kind"] == "sight" and item["sight"] == sight["sight"]), None)
+            window = window_for(slot)
+            if not block or not window:
+                continue
+            start, end = _clock_hours(block["start"]), _clock_hours(block["end"])
+            # A clash the engine created is a defect; one the user chose is their call. The
+            # second is reported with the better time so they can act on it, and never
+            # blocks the plan -- being locked out of your own itinerary helps nobody.
+            chosen_by_user = bool(sight.get("user_pinned"))
+            advice = next((item for item in schedule.get("conflicts", [])
+                           if item.get("sight") == sight["sight"]), None)
+            if start < window[0] - 1e-9:
+                if chosen_by_user:
+                    report.warn(
+                        "schedule",
+                        (advice or {}).get("message")
+                        or f"Day {number}: '{sight['sight']}' is a {slot} sight scheduled at {block['start']}.",
+                        f"Best seen {_clock(window[0])}-{_clock(window[1])}"
+                        + (f"; try {advice['suggested_at']} on this day" if advice else "")
+                        + ", or move it to a day whose evening is free.",
+                        number,
+                    )
+                else:
+                    report.critical(
+                        "schedule",
+                        f"Day {number}: '{sight['sight']}' is a {slot} sight but starts at {block['start']}, "
+                        f"before its {_clock(window[0])} window.",
+                        f"Move it to a day that can give it {_clock(window[0])}-{_clock(window[1])}, or leave it "
+                        f"out; a {slot} sight is never scheduled in the morning.",
+                        number,
+                    )
+            elif end > window[1] + 1e-9 and chosen_by_user:
+                report.warn(
+                    "schedule",
+                    f"Day {number}: '{sight['sight']}' runs to {block['end']}, past the {_clock(window[1])} "
+                    f"end of its {slot} window.",
+                    "Start the day later, or drop a stop before it.",
+                    number,
+                )
+            elif end > window[1] + 1e-9:
+                report.critical(
+                    "schedule",
+                    f"Day {number}: '{sight['sight']}' is a {slot} sight but runs to {block['end']}, "
+                    f"past its {_clock(window[1])} window.",
+                    f"Shorten the day before it or move the sight; {slot} sights end by {_clock(window[1])}.",
+                    number,
+                )
+
+        # Anything the clock could not place has to be accounted for, not quietly missing.
+        for entry in schedule.get("deferred", []):
+            report.critical(
+                "schedule",
+                f"Day {number}: '{entry['sight']}' was left off the clock ({entry.get('reason', 'no reason given')}).",
+                "Re-run the plan; a deferred sight must be re-homed or dropped with a reason.",
+                number,
+            )
+
+        for flag in schedule.get("flags", []):
+            report.warn("schedule", f"Day {number}: {flag}",
+                        "Reorder the day, or correct best_time in the dataset if the preference is wrong.", number)
+        for note in schedule.get("notes", []):
+            report.note("schedule", f"Day {number}: {note}", number)
+        for conflict in schedule_conflicts(day, patterns):
+            report.note("schedule", conflict, number)
+
+    if not patterns.has_clock_times and patterns.days_seen:
+        report.note(
+            "schedule",
+            f"The {patterns.days_seen} past itinerary days read from the workbook carry no clock times, so the "
+            f"times here come from each sight's best_time and measured durations, never from those itineraries.",
+        )
+
+
 def _sight_row(dataset: Dataset, city_key: str, sight: str):
     """Dataset row for a scheduled sight, searched in its city first, then anywhere."""
     key = normalize_key(sight)
@@ -605,6 +839,7 @@ def validate_itinerary(payload: dict, dataset: Dataset, pace: str, month: int | 
     _check_nights(payload, report)
     _check_seasonality(payload, dataset, month, report)
     _check_duplicates_and_logic(payload, dataset, report)
+    _check_schedule(payload, dataset, report)
 
     for gap in payload.get("data_gaps", []):
         report.warn("route_data", f"Data gap: {gap}", "Fill the missing row so the plan rests on real data.")

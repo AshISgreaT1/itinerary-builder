@@ -39,11 +39,41 @@ def test_placement_options_cover_every_day_of_the_city(dataset, base_plan):
 
 
 def test_placement_options_explain_why_a_day_is_full(dataset, base_plan):
+    """Every day that cannot take the sight has to say why, and what would help."""
     options = placement_options(base_plan, dataset, "Rohtang Pass", "Manali", "active")
     full_days = [option for option in options["options"] if not option["fits"]]
     assert full_days, "Rohtang Pass cannot fit every day"
     assert all(option["blockers"] for option in full_days)
-    assert any(option["replace_options"] or option["fits_if_dropped"] for option in full_days)
+    way_forward = any(option["replace_options"] or option["fits_if_dropped"] for option in full_days)
+    assert way_forward or options["needs_more_than_a_day"],         "a day that is full must offer a swap, or the plan must say the sight is too big for any day"
+
+
+def test_a_sight_too_big_for_any_day_says_so(dataset, base_plan):
+    """Rohtang Pass is 61 km of mountain road each way: no swap can make it fit.
+
+    Measured road distances turned this from a packing problem into an impossible one, and
+    'every day is full' would read as the former.
+    """
+    options = placement_options(base_plan, dataset, "Rohtang Pass", "Manali", "active")
+    message = options["needs_more_than_a_day"]
+    if message is None:  # without the measured-distance cache it still fits somewhere
+        assert options["best_day"] or any(o["fits_if_dropped"] or o["replace_options"]
+                                          for o in options["options"])
+        return
+    assert "needs" in message and "more than the longest day" in message
+    assert not any(option["fits"] for option in options["options"])
+
+
+def test_a_day_trip_never_lands_on_the_departure_day(dataset):
+    """The last day holds the onward journey; an out-of-town day trip cannot share it."""
+    from app.builder import PlanRequest, build_itinerary
+
+    for city, days, pace in [("Jaisalmer", 4, "moderate"), ("Udaipur", 4, "moderate"), ("Manali", 4, "active")]:
+        plan = build_itinerary(PlanRequest(cities=[city], duration_days=days, pace=pace), dataset)
+        last = plan["days"][-1]
+        assert last["is_departure_day"]
+        assert not [sight for sight in last["sights"] if sight["is_excursion"]],             f"{city}: a day trip sits on the departure day"
+        assert plan["validation"]["passed"], plan["validation"]["issues"]
 
 
 def test_placement_options_ignore_the_sight_itself(dataset, base_plan):

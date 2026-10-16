@@ -34,6 +34,8 @@ python -m app.cli --cities Manali Kasol --days 5 --pace moderate --from Delhi --
 | GET | `/` | Planning UI (pick cities, days, pace, origin, month; edit the result; prints cleanly) |
 | POST | `/generate-itinerary` | Build the day-by-day plan (accepts `pinned_sights` / `excluded_sights`) |
 | POST | `/itinerary/adjust` | Add, replace or remove sights and rebuild the plan |
+| POST | `/itinerary/customize` | Move, swap, reorder, retime, lengthen a day, re-split the trip, add your own activity |
+| POST | `/itinerary/suggestions` | What could be improved, each with the call that would do it |
 | POST | `/itinerary/placement-options` | Which days could hold a sight, and what would have to move |
 | GET | `/cities` | Cities that can be planned, with sight counts |
 | GET | `/cities/{city}/sights` | A city's canonical sights in priority order |
@@ -44,6 +46,13 @@ python -m app.cli --cities Manali Kasol --days 5 --pace moderate --from Delhi --
 curl -X POST http://127.0.0.1:8000/generate-itinerary \
   -H "Content-Type: application/json" \
   -d '{"cities":["Manali","Kasol"],"duration_days":5,"pace":"moderate","origin_city":"Delhi","start_month":6}'
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/itinerary/customize   -H "Content-Type: application/json"   -d '{"base":{"cities":["Jaipur","Udaipur"],"duration_days":6},
+       "operations":[{"operation":"reallocate","city_days":{"Jaipur":3,"Udaipur":3}},
+                     {"operation":"extend_day","day":2,"hours":1.5},
+                     {"operation":"add_activity","name":"Dinner at Ambrai","day":2,"at":"20:00"}]}'
 ```
 
 `origin_city` and `start_month` are optional. The origin makes day 1 a real travel day
@@ -79,6 +88,60 @@ used      = Σ duration_hours + 0.3 h per sight + local driving between stops
 Local driving comes from the real coordinates (straight line × 1.3, at 28 km/h, or 22 km/h
 above 1200 m), so a scattered day runs out of hours before a compact one does.
 
+## Road distances: measured, not estimated
+
+By default the engine approximates road distance as a straight line inflated by
+`ROAD_DISTANCE_FACTOR` (1.3). Measured against OSRM over this dataset's 6 106 comparable
+pairs, that factor is **systematically low**:
+
+| | |
+| --- | --- |
+| median measured / estimated | **1.14** (the real detour factor is 1.48, not 1.30) |
+| estimate too low | 56% of pairs |
+| estimate too high | 4% of pairs |
+| worst case | 3.9 km estimated, **63.2 km** by road |
+
+So the engine prefers a measured distance wherever it has one. `app/osrm.py` fetches the
+whole matrix once from [OSRM](https://project-osrm.org/) into `data/road_distances.json`,
+and `road_km()` reads it from there.
+
+**Building the cache.** OSRM is open source and self-hosted, so there is no key, no quota
+and no network dependency at planning time:
+
+```bash
+# one-off: build the routing graph (needs ~8 GB RAM for an India extract)
+wget https://download.geofabrik.de/asia/india-latest.osm.pbf
+docker run -t -v "${PWD}:/data" ghcr.io/project-osrm/osrm-backend     osrm-extract -p /opt/car.lua /data/india-latest.osm.pbf
+docker run -t -v "${PWD}:/data" ghcr.io/project-osrm/osrm-backend     osrm-partition /data/india-latest.osrm
+docker run -t -v "${PWD}:/data" ghcr.io/project-osrm/osrm-backend     osrm-customize /data/india-latest.osrm
+docker run -p 5000:5000 -v "${PWD}:/data" ghcr.io/project-osrm/osrm-backend     osrm-routed --algorithm mld --max-table-size 200 /data/india-latest.osrm
+```
+
+```bash
+python -m app.osrm --build --url http://localhost:5000
+```
+
+That is 33 table requests for this dataset -- one per city (its sights plus the centre) and
+one for the 52 city centres -- and writes about 6 300 measured pairs. OSRM's public demo
+server (`--url https://router.project-osrm.org`) works for a one-off build and is what the
+shipped cache was built with, but it is rate-limited and not meant for production, so the
+builder paces itself at one request a second against it.
+
+**What is cached and what is not.** Distances are cached and used. Durations are cached but
+**not** used: OSRM puts Manali to Rohtang Pass at 1.0 h for 61 km of mountain road, where
+the engine's altitude-aware model says 2.8 h, which is far closer to reality. Speed stays
+with the engine; distance comes from OSRM.
+
+**Nothing is faked.** A pair the router could not route is simply left out of the cache and
+keeps the straight-line estimate, and every plan reports the split in
+`summary.road_distances` (`measured_legs`, `estimated_legs`, and which legs are still
+estimates). Delete the cache file and the engine behaves exactly as it did before.
+
+**Measurement finds bad coordinates.** How far OSRM has to move a point to reach a road is
+itself a data check: 16 coordinates in this dataset sit more than 2 km from any road, and
+the worst -- Leh / Nakeela at 13.3 km -- is rounded to two decimal places in a region where
+that matters. They are reported by `python -m app.datacheck --kind coordinate_far_from_road`.
+
 ## Travel realism
 
 A day is only as long as what is left of it:
@@ -102,6 +165,119 @@ available = pace allowance
   the distance in the dataset's own `nearest_airport` / `nearest_railhead` cell. When that
   cell has no distance, a clearly labelled assumption is used and listed in `data_gaps`.
 
+## The timed day
+
+Every day comes back with a clock schedule: travel, visits, lunch, a short break and
+waiting, laid out from `09:00` (`08:00` on driving days) and finishing by `20:00`.
+
+**A day starts when its sights ask it to.** Udaipur's lakes are evening sights, and laying
+such a day out from 09:00 put a sunset boat ride at 12:37 while the evening stood empty. So
+the day is laid out once and, if a hard slot was missed only because the day began too
+early, laid out again from later in the morning -- the smallest shift that rescues a stop
+without running past `20:00`. The shift is stated on the day ("the day starts at 13:25 ...").
+
+```
+09:00 – 09:29  Set off for City Palace      0.5h including parking and tickets
+09:29 – 11:29  City Palace                  morning visit
+11:29 – 11:47  Drive to Jantar Mantar
+11:47 – 12:47  Jantar Mantar                morning visit
+12:47 – 13:47  Lunch
+...
+15:34 – 16:30  Free time before Birla Temple   it is best seen from 16:30
+16:30 – 17:30  Birla Temple                 evening visit
+```
+
+Times are derived, never invented: visit lengths come from `duration_hours`, driving from
+the coordinates, intercity legs from `city_distances`. Day start, lunch and break lengths
+are the engine's own assumption, stated in `summary.schedule_assumptions` on every plan.
+Opening hours are read from the workbook's `opening_time` / `closing_time` columns and, where
+present, narrow a sight's window; **in the shipped dataset all 254 rows are empty**, so the
+plan says so rather than assuming a door is open.
+
+**The totals are the schedule.** A day's reported hours are read back off its own blocks, so
+the header cannot drift from the timeline:
+
+| field | what it holds |
+| --- | --- |
+| `schedule.totals.sightseeing` | time inside the sights |
+| `schedule.totals.local_travel` | driving between them, hotel to hotel |
+| `schedule.totals.stop_buffers` | parking and tickets, `0.3h` a stop |
+| `schedule.totals.intercity_travel` | the day's transfer, from `city_distances` |
+| `schedule.totals.meals_and_breaks` | lunch and the afternoon break |
+| `schedule.totals.waiting` | time held for a slot that has not opened yet |
+| `schedule.activity_hours` | sightseeing + local travel + buffers: what the pace budgets |
+| `schedule.span_hours` | first block to last: how long the day really is |
+
+`accounted_hours` is the sum of the totals and must equal `span_hours`; `day.used_hours`
+must equal `activity_hours`. Both are **critical** validation checks, so a day whose header
+disagrees with its own clock fails the plan rather than being shown.
+
+**Hard slots: evening and sunset.** These are constraints, not preferences. A sight marked
+`evening` is visited between **16:30 and 20:00**, `sunset` between **16:30 and 19:30**, or it
+is not visited at all. There is no "close enough" and no grace: a plan that starts one before
+16:30 fails validation. Four things enforce it, in order:
+
+1. **The packer refuses an impossible booking.** `hard_slot_blocker()` checks that the day's
+   evening sights fit the window at all -- three of them do not fit 3.5 hours, and a departure
+   day that owes four hours to the onward journey has no evening to give.
+2. **The day starts later.** Rather than see a sunset lake at noon, the day is laid out again
+   from later in the morning -- the smallest shift that rescues a stop without running past
+   20:00. Udaipur day 1 begins at 12:44 so Lake Pichola lands at 17:30.
+3. **A flexible stop fills the wait.** `_pull_flexible_forward()` moves an `any` sight into the
+   gap before an evening one, so the wait becomes a visit. Only genuinely flexible sights move:
+   dragging a morning sight into a late gap would just trade one misplacement for another.
+4. **Otherwise the sight leaves the day.** The clock never places it at the wrong hour; it goes
+   into `schedule.deferred`, and the builder re-plans to put it on another day whose evening is
+   free. If no day can take it, it is dropped from the trip with its reason in
+   `unplaceable_reasons`, still offered in `unscheduled_sights`, and shown in the UI under
+   "Kept for another trip". A sight left deferred in a finished plan is a critical failure.
+
+Across 36 plans in 12 cities this produces **zero** hard-slot violations, with six sights held
+back and explained. `morning` and `afternoon` are preferences --
+nearly half the dataset says "morning", so no day could honour them all -- and are only
+reported when a visit lands in the wrong half of the day. A sight with no `best_time` is
+placed in day order and flagged, never given an invented time.
+
+## What the past itineraries teach
+
+The workbook's `itineraries` sheet holds 1 241 agent-written days. Two things decide how
+far it is trusted:
+
+* **It carries no clock times at all**, so no time of day is ever taken from it. Every plan
+  says so in its notes.
+* **Its order does not follow `best_time`** -- averaged over the sheet, "morning" sights sit
+  at position 0.52 of a day and "evening" ones at 0.54.
+
+What it does give is pairwise ordering, and that is strong: Shanti Stupa before Leh Palace
+27 times against 6, Echo Point before Mount Carmel 23 against 0. The planner uses those
+habits **only to settle ties inside one time slot, and only when the swap costs no extra
+driving**. Where the plan still differs it says why, for example *"past itineraries usually
+visit 'Echo point' before 'Kundala Lake' (11 times against 0); this plan keeps the shorter
+driving order instead"*.
+
+**Day 1 carries the main sights.** In the agent itineraries **85.3%** of day-1 stops are
+must-visits, against roughly 47% on every later day (mean priority 3.7 against 5-7.5). The
+first day is when the famous sights are seen, not what is left over -- so the arrival day now
+claims the cluster richest in must-visits, instead of choosing last because it has the fewest
+hours. That moved the engine's own day-1 must-visit share from **36.8% to 70.7%**, and Udaipur
+day 1 now opens with City Palace and Lake Pichola.
+
+**Day 1 stays in town.** The arrival day is short and the traveller has just spent it
+travelling, so no distant destination is scheduled on it. The limit is measured from the
+same sheet rather than chosen:
+
+| | day 1 | later days |
+|---|---|---|
+| median distance from the city centre | 4.0 km | 8.5 – 11.7 km |
+| 90th percentile | 23.2 km | 27.9 km and up |
+| stops 35 km or more out | **1.0%** (3 of 286) | 18.3% |
+
+`ARRIVAL_DAY_MAX_KM` is therefore 25 km, which keeps 93% of what the agents actually did on
+day 1. A sight over the limit is **deferred, not dropped**: the packer leaves it for a later
+day (Jaisalmer's Kuldhara, 30 km out, moves to day 2), and if no day can take it, it stays
+in `unscheduled_sights` where the UI offers it. An explicit pin outranks the rule -- if you
+ask for Kuldhara on day 1 you get it, with a warning saying it is past the usual limit.
+
 ## Stops on the way, and days that are only travel
 
 **En-route stops.** A sight you simply drive past does not belong to either city: Chang La
@@ -122,18 +298,92 @@ impossible one. Past 13 h it needs an overnight bus or train, and past
 
 | Rule | Where | Default |
 |---|---|---|
+| Road distance source | `ROAD_CACHE_PATH`, `ROAD_DISTANCE_FACTOR` | measured if cached, else straight line x 1.3 |
 | Daily active hours | `PACE_ACTIVE_HOURS` | 5 / 7 / 9 h |
 | Per-sight buffer | `SIGHT_BUFFER_HOURS` | 0.3 h |
 | Stops per day | `MAX_SIGHTS_PER_DAY` | 4 / 5 / 6 |
 | Distance between consecutive stops | `MAX_LEG_KM` | 30 km |
 | Sight-to-sight route per day | `MAX_DAY_ROUTE_KM` | 70 km |
 | Day trip (far from the city) | `EXCURSION_KM`, `MAX_STOPS_WITH_EXCURSION` | 35 km, 2 other stops |
+| Arrival day stays in town | `ARRIVAL_DAY_MAX_KM` | 25 km from the centre |
+| Hard time slots | `HARD_TIME_SLOTS`, `TIME_WINDOWS` | evening 16:30-20:00, sunset 16:30-19:30 |
+| Re-homing a missed slot | `MAX_SLOT_ROUNDS`, `MAX_SLOT_REPAIRS` | 6 rounds, 2 target days each |
 | Stop made during a drive | `EN_ROUTE_MAX_DETOUR_KM`, `EN_ROUTE_MAX_STOPS` | 15 km off the road, 3 stops |
 | Longest pure travel day | `TRAVEL_DAY_MAX_DRIVE_HOURS` | 13 h driving |
 | Wrong-city detection | `WRONG_CITY_KM` | 120 km from the city centre |
 | Every city gets usable time | `MIN_CITY_USABLE_FRACTION` | half a day |
 
 All of them live in `app/config.py`.
+
+## Changing a plan after it is generated
+
+A generated plan is a starting point. `POST /itinerary/customize` takes the original request
+plus a list of operations and rebuilds from them -- every change goes back through the whole
+pipeline, because a payload patched in place is exactly how a header starts disagreeing with
+its own timeline.
+
+| Operation | What it does |
+| --- | --- |
+| `move` | put a stop on another day |
+| `swap` | exchange two stops between days |
+| `reorder` | set a day's order outright (what a drag ends with) |
+| `retime` | ask for a stop at a particular time |
+| `to_morning` | push a flexible stop to the front of its day |
+| `extend_day` | lengthen one day beyond the pace (`hours: 0` undoes it) |
+| `reallocate` | change the split of days between cities |
+| `pin` / `drop` | add or remove a sight |
+| `add_activity` | add something of your own -- a dinner, a show |
+
+**Every operation is checked against its own intent.** A stop dragged onto a full day does
+not quietly disappear: the change is rolled back and the response says what would make room
+-- *"'Jagdish temple' could not be placed on day 1 ... Day 1 has 0.1h spare of 5.0h. Add
+hours to it (extend_day), or swap with one of 'City Palace', 'Lake Pichola'."* Run
+`extend_day` first and the same move succeeds.
+
+**A manual move moves one thing.** `move` and `swap` pin every other stop where it already
+is, so re-planning around a drag re-costs the route and the clock without rearranging four
+days the user never touched.
+
+**Longer days, in both directions.** `extra_day_hours` raises a day's budget and, with it,
+the stop cap -- one more stop per `EXTRA_HOURS_PER_STOP` (2h). Validation allows the longer
+day and notes it rather than failing; the 20:00 clock limit still applies, so the extra hours
+buy sights, not miracles.
+
+**Your own plans are time on the clock.** A custom activity has no coordinates, so it costs
+no travel -- it is simply time the day owes to something, counted in
+`schedule.totals.your_own_plans` and never against the sightseeing pace.
+
+## Suggestions, not just complaints
+
+`POST /itinerary/suggestions` returns what could be improved, each with the call that would
+do it. The same list comes back on every `customize` response, so acting on one suggestion
+shows you what is left.
+
+| Suggestion | Raised when |
+| --- | --- |
+| `retime` | a hard-slot sight is at the wrong hour **and that day still has evening room** |
+| `move_day` | it does not, but another day's evening does |
+| `free_evening` | a flexible stop is occupying evening space while an evening sight waits |
+| `extend_day` | a day is full while must-visit sights did not fit, and it ends before 20:00 |
+| `reallocate` | one city is starved of must-visits while another has hours to spare |
+| `add` | a sight the engine held back, and what pinning it would mean |
+
+A `retime` is only offered when it can actually be taken: suggesting 16:30 to two sights at
+once is advice nobody can act on, so the engine checks the evening's remaining room first and
+falls through to `move_day`.
+
+## Two kinds of validation
+
+The hard-slot rule is enforced against **the engine** and advisory for **the user**:
+
+* A plan the engine produced on its own never puts an evening sight outside 16:30-20:00. If
+  it cannot honour the slot it re-homes the sight or leaves it out with a reason, and a
+  violation is a **critical** failure.
+* A clash the user chose -- pinning three evening sights to one day, or reordering a day so a
+  sunset lands at noon -- is kept, reported as a **warning**, and paired with the better time
+  in `schedule.conflicts`. Being locked out of your own itinerary helps nobody.
+
+The difference is `user_pinned` on the stop, set by a pin, a hand-set order or a retime.
 
 ## Validation report
 
@@ -144,6 +394,7 @@ with what the planner claimed.
 
 | Category | Catches |
 |---|---|
+| `schedule` | overlapping blocks, a sight scheduled twice, **an evening or sunset sight outside 16:30-20:00**, a sight left off the clock, days running past 20:00 |
 | `travel_feasibility` | journeys with no time in the dataset, legs too long for a day, sightseeing on a travel day |
 | `route_data` | reported metrics that disagree with the coordinates, corrected rows, suboptimal visiting order (warning) |
 | `time_and_activity_load` | more hours or stops than the day holds |
@@ -229,19 +480,44 @@ already in the workbook. On `sample_dataset_v4_clean.xlsx` it reports 69 finding
 python -m pytest tests -q
 ```
 
-80 tests: dataset loading and month parsing, clustering determinism, pace and distance caps
+197 tests: dataset loading and month parsing, clustering determinism, pace and distance caps
 on real plans, seasonal filtering, day-allocation fairness, the API endpoints, travel
 realism (missing route data, overnight legs, travel-only days), departure-day reservations,
 hotel-night consistency, the Goa December and June/September cases, fault injection
 (a deliberately corrupted plan must fail validation), and the editing API (add, replace,
 remove, pinning to a day, and the suggestions when a sight will not fit), and the dataset
-quality report, en-route stops, and travel-only days.
+quality report, en-route stops, travel-only days, clock schedules, preferred visiting
+times, the patterns mined from past itineraries, and the Udaipur regressions (day totals
+reconciling with the clock on four city/pace combinations, meals counted outside the
+sightseeing budget, en-route detours charged to the day rather than to the drive, evening
+sights landing in the evening after a late start, every hard-slot clash carrying an
+alternative, an unknown pinned sight being refused instead of dropped, and the API not
+stripping the totals out of the response), and the arrival-day rule (six city/pace
+combinations keep day 1 within the limit, a displaced sight moves to a later day rather than
+vanishing, an explicit pin still wins, and the limit is re-derived from the workbook so it
+stays honest if the data changes), and the OSRM layer (the client against a stub server,
+unroutable pairs keeping the estimate, distant snaps being reported, the cache preferring
+the measured direction, a missing cache file being harmless, planning making no network
+call, and two runs of one request producing identical plans), the hard slots (eight
+city/pace combinations where no evening or sunset sight starts before 16:30, nothing is left
+deferred, only flexible sights are pulled into a wait, the packer refusing a departure-day
+evening, and the validator rejecting both a hand-broken morning placement and a deferred
+sight), and day 1 (must-visit share, staying in town, and the 85%/47% split re-derived from
+the workbook), and customisation (day splits that do and do not add up, lengthened days and
+their stop cap, a move that cannot fit being rolled back rather than losing the sight, a
+manual move leaving other days alone, swaps, reorders, custom activities landing on the clock
+and in the totals, a user's slot clash not blocking the plan, the advised time matching where
+the sight actually is, suggestions carrying actions that apply cleanly, and both endpoints).
 
 ## Layout
 
 ```
 app/
   config.py         tunable rules and thresholds
+  customize.py      post-generation operations (move, swap, extend, reallocate, ...)
+  suggest.py        what to do about a plan, as actions rather than complaints
+  osrm.py           builds the measured-distance cache (run once, needs OSRM)
+  roadcache.py      reads it; the planner never calls the network
   data_loader.py    Excel -> cleaned DataFrames (cached)
   normalization.py  canonical attraction names, duplicate merging
   geo.py            haversine, local travel time, intercity graph (networkx), route order
@@ -252,6 +528,8 @@ app/
   edits.py          add / replace / remove, placement options, rebuild
   datacheck.py      dataset quality report (CLI + /data-quality)
   enroute.py        stops made on the way between two cities
+  schedule.py       the clock: blocks, preferred times, lunch and breaks
+  patterns.py       ordering habits mined from past itineraries
   models.py         pydantic request/response schemas
   main.py           FastAPI app (also serves the UI)
   static/           the planning UI (single page, no build step)
@@ -262,11 +540,16 @@ tests/              pytest suite
 
 ## Known limits
 
+- OSM road coverage is thinner in Ladakh and rural Rajasthan than in the cities, and OSRM
+  knows nothing about seasonal closures (Khardung La, Rohtang). A measured distance is still
+  a fair-weather one.
 - `city_distances` covers 45 of 52 cities and has no long-haul legs (for example Delhi to
   Goa). Missing pairs are routed over connecting roads where possible; otherwise the leg is
   reported as a data gap and the trip fails validation rather than being planned on a
   guessed journey time.
-- Trip days are assumed to be full days bounded by arrival and departure overheads; there
-  is no clock, so opening hours are not checked (the dataset's `opening_time` columns are
-  empty). `best_time` only orders a day, it does not pin a sight to a time.
+- Opening hours are honoured when the dataset carries them, but the shipped workbook's
+  `opening_time` / `closing_time` columns are empty for all 254 sights, so in practice only
+  `best_time` constrains the clock. No door is ever assumed to be open or shut.
+- The repair pass re-plans at most `MAX_SLOT_REPAIRS` (2) times per plan, so a day with
+  three unreachable evening sights may still report one by alternative rather than moving it.
 - Hotels are not selected: every day's local driving is measured from the city centre.

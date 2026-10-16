@@ -99,6 +99,35 @@
   ol.sights li.en-route { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 7%, transparent), transparent); }
   .desc { color: var(--muted); font-size: 13.5px; margin-top: 6px; }
   .notes { margin: 0; padding: 10px 18px 14px; color: var(--muted); font-size: 13px; }
+  .tl-note { margin: 6px 0 0; font-size: 12.5px; color: var(--muted); }
+  .tips .tip { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center;
+               padding: 10px 12px; margin: 8px 18px; border-radius: 10px; border: 1px solid var(--line); }
+  .tip-what { font-size: 13px; }
+  .tip-fix { grid-column: 1; font-size: 12.5px; color: var(--muted); }
+  .tip .apply { grid-row: 1 / span 2; grid-column: 2; }
+  .tip-conflict { background: rgba(37, 99, 235, 0.06); border-color: rgba(37, 99, 235, 0.25); }
+  .tip-capacity, .tip-balance { background: rgba(16, 185, 129, 0.06); border-color: rgba(16, 185, 129, 0.25); }
+  .day-controls { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 18px 10px; }
+  .sights li[draggable="true"] { cursor: grab; }
+  .sights li.dragging { opacity: 0.45; }
+  .sights li.drop-target { outline: 2px dashed var(--accent); outline-offset: 2px; border-radius: 8px; }
+  section.day.drop-target { outline: 2px dashed var(--accent); outline-offset: 4px; }
+  .legend.outside { color: var(--muted); font-size: 12px; margin-top: -2px; }
+  .tl-alt { margin: 6px 0 0; padding: 7px 10px; border-radius: 8px; font-size: 12.5px;
+            background: rgba(37, 99, 235, 0.08); color: #1d4ed8; border: 1px solid rgba(37, 99, 235, 0.25); }
+  .timeline { margin: 4px 18px 10px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .timeline summary { cursor: pointer; font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+  .tl-row { display: grid; grid-template-columns: 96px 12px 1fr; gap: 10px; align-items: baseline;
+    padding: 4px 0; font-size: 13.5px; }
+  .tl-time { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  .tl-dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 5px; background: var(--muted); }
+  .tl-sight .tl-dot { background: var(--sight); }
+  .tl-travel .tl-dot, .tl-transfer .tl-dot { background: var(--travel); }
+  .tl-lunch .tl-dot, .tl-break .tl-dot { background: var(--accent); }
+  .tl-free .tl-dot, .tl-wait .tl-dot { background: var(--line); }
+  .tl-label b { font-weight: 620; }
+  .tl-detail { color: var(--muted); font-size: 12.5px; }
+  .tl-flag { color: var(--warn); font-size: 12.5px; margin-top: 6px; }
   .notes li { margin-bottom: 3px; }
   .empty { padding: 14px 18px 18px; color: var(--muted); font-size: 14px; }
   .missed { margin-top: 18px; background: var(--panel); border: 1px solid var(--line);
@@ -186,6 +215,9 @@
 const $ = (id) => document.getElementById(id);
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 let cities = [], chosen = [], lastRequest = null, lastPlan = null, edits = [];
+// Customisations are kept on the request, not patched into the plan: every change is a
+// rebuild, which is the only way the route, the clock and the validator stay in step.
+let customisations = [];
 
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -248,6 +280,8 @@ $("form").addEventListener("submit", async (event) => {
   };
   lastRequest = body; edits = [];
   try {
+    customisations = [];
+    edits = [];
     const response = await fetch("/generate-itinerary", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
@@ -255,6 +289,12 @@ $("form").addEventListener("submit", async (event) => {
     if (!response.ok) {
       $("out").innerHTML = `<p class="err">${esc(payload.detail || "Could not plan this trip.")}</p>`;
     } else {
+      // /generate-itinerary does not compute suggestions; ask for them so a fresh plan
+      // arrives with the same advice a customised one carries.
+      payload.suggestions = await fetch("/itinerary/suggestions", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base: body }),
+      }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
       render(payload);
     }
   } catch (error) {
@@ -287,6 +327,8 @@ function validationBanner(validation) {
 
 function dayCard(day) {
   const budget = day.time_budget || {};
+  const schedule = day.schedule || {};
+  const totals = schedule.totals || {};
   const allowance = Math.max(budget.pace_allowance || 0, day.used_hours + (budget.intercity_travel_hours || 0));
   const part = (value) => `${Math.max(0, (value / (allowance || 1)) * 100)}%`;
   const travel = (budget.intercity_travel_hours || 0) + (budget.day_overhead_hours || 0);
@@ -300,12 +342,19 @@ function dayCard(day) {
       <span><i style="background:var(--buffer)"></i>stop buffers ${hours(day.buffer_hours)}</span>
       <span><i style="background:var(--travel)"></i>travel &amp; overheads ${hours(day.local_travel_hours + travel)}</span>
       <span><i style="background:var(--free)"></i>free ${hours(Math.max(0, day.available_hours - day.used_hours))}</span>
-    </div>`;
+    </div>
+    ${totals.meals_and_breaks || totals.waiting || totals.check_in_out ? `<div class="legend outside">
+      <span>on top of the sightseeing budget:</span>
+      ${totals.meals_and_breaks ? `<span>meals &amp; breaks ${hours(totals.meals_and_breaks)}</span>` : ""}
+      ${totals.waiting ? `<span>waiting for a slot ${hours(totals.waiting)}</span>` : ""}
+      ${totals.check_in_out ? `<span>check-in / out ${hours(totals.check_in_out)}</span>` : ""}
+    </div>` : ""}`;
 
   const sights = day.sights.length
     ? `<ol class="sights">${day.sights.map((sight, index) => `
-        <li class="${sight.en_route ? "en-route" : ""}">
-          <div class="num">${sight.en_route ? "&#9655;" : index + 1}</div>
+        <li class="${sight.en_route ? "en-route" : ""}" draggable="${!sight.en_route}"
+            data-sight="${esc(sight.sight)}" data-from-day="${day.day}" data-index="${index}">
+          <div class="num" title="drag to move">${sight.en_route ? "&#9655;" : index + 1}</div>
           <div>
             <div class="sight-name">${esc(sight.sight)}</div>
             <div class="tags">
@@ -329,13 +378,41 @@ function dayCard(day) {
     ? `${esc(day.transfer.from_city)} → ${esc(day.transfer.to_city)}${day.transfer.drive_hours !== null ? ` · ${hours(day.transfer.drive_hours)} by ${esc(day.transfer.mode)}` : " · journey time missing"}`
     : esc(day.city);
 
-  return `<section class="day">
+  const timeline = (schedule.blocks || []).length
+    ? `<details class="timeline" open>
+        <summary>Timed plan · ${esc(schedule.starts)} to ${esc(schedule.ends)}</summary>
+        ${schedule.blocks.map((block) => `
+          <div class="tl-row tl-${esc(block.kind)}">
+            <span class="tl-time">${esc(block.start)} – ${esc(block.end)}</span>
+            <span class="tl-dot"></span>
+            <span class="tl-label">${block.kind === "sight" ? `<b>${esc(block.label)}</b>` : esc(block.label)}
+              ${block.detail ? `<div class="tl-detail">${esc(block.detail)}</div>` : ""}</span>
+          </div>`).join("")}
+        ${(schedule.notes || []).map((note) => `<div class="tl-note">${esc(note)}</div>`).join("")}
+        ${(schedule.flags || []).map((flag) => `<div class="tl-flag">⚠ ${esc(flag)}</div>`).join("")}
+        ${(schedule.alternatives || []).map((entry) => `<div class="tl-alt">
+            ↪ <b>${esc(entry.sight)}</b> ${esc(entry.problem)} — ${esc(entry.suggestion)}
+          </div>`).join("")}
+      </details>`
+    : "";
+
+  const controls = `<div class="day-controls">
+      <button class="mini" data-extend="${day.day}" data-hours="1.5">+1.5h on this day</button>
+      ${(budget.extra_hours || 0) > 0
+        ? `<button class="mini" data-extend="${day.day}" data-hours="0">reset +${hours(budget.extra_hours)}</button>` : ""}
+      <button class="mini" data-activity="${day.day}">+ your own activity</button>
+    </div>`;
+
+  return `<section class="day" data-day="${day.day}" data-city="${esc(day.city)}">
       <header>
         <div><h2>Day ${day.day} · ${esc(day.city)}</h2><div class="where">${where}</div></div>
-        <div class="where">${hours(day.used_hours)} of ${hours(day.available_hours)} used</div>
+        <div class="where">${hours(day.used_hours)} of ${hours(day.available_hours)} used${
+          schedule.span_hours ? ` · on the go ${esc(schedule.starts)}–${esc(schedule.ends)} (${hours(schedule.span_hours)})` : ""}</div>
       </header>
       ${bar}
+      ${controls}
       ${sights}
+      ${timeline}
       ${day.notes && day.notes.length ? `<ul class="notes">${day.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}
     </section>`;
 }
@@ -360,6 +437,27 @@ function render(plan) {
         </div>`).join("")}</div>`
     : "";
 
+  const tips = (plan.suggestions || {}).suggestions || [];
+  const tipPanel = tips.length
+    ? `<section class="day tips"><h2>Suggestions</h2>
+        <div class="sub">Each one is a single change. Nothing is applied until you say so.</div>
+        ${tips.map((tip, index) => `<div class="tip tip-${esc(tip.group)}">
+            <div class="tip-what">${esc(tip.message)}</div>
+            <div class="tip-fix">${esc(tip.fix)}</div>
+            <button class="mini apply" data-tip="${index}">Apply</button>
+          </div>`).join("")}
+      </section>`
+    : "";
+  window._tips = tips;
+  const slotted = Object.entries(plan.unplaceable_reasons || {});
+  const slotNote = slotted.length
+    ? `<section class="day missed"><h2>Kept for another trip</h2>
+        <div class="sub">These need a time of day no day on this trip can give them. The engine leaves
+        them out rather than showing them at the wrong hour.</div>
+        <ul class="notes">${slotted.map(([label, reason]) =>
+          `<li><b>${esc(label.split(" / ").slice(1).join(" / "))}</b> — ${esc(reason)}</li>`).join("")}</ul>
+      </section>`
+    : "";
   const missed = Object.keys(plan.unscheduled_reasons || {}).length
     ? `<div class="missed"><h3>Must-visit sights that did not fit</h3><ul>${
         Object.entries(plan.unscheduled_reasons).map(([label, reason]) =>
@@ -377,11 +475,19 @@ function render(plan) {
     <div class="where" style="color:var(--muted);font-size:13px">${esc(plan.request.pace)} pace · ${nights}${
       summary.departure_day_reserved_for ? ` · departure: ${esc(summary.departure_day_reserved_for)}` : ""}</div>
     ${stats}${validationBanner(plan.validation)}${route}
-    ${plan.days.map(dayCard).join("")}${changeLog(plan)}${addPanel(plan)}${missed}${closed}`;
+    ${tipPanel}${plan.days.map(dayCard).join("")}${operationLog(plan)}${changeLog(plan)}${slotNote}${addPanel(plan)}${missed}${closed}`;
   window.scrollTo({ top: $("out").offsetTop - 20, behavior: "smooth" });
 }
 
 // --- editing: add, replace or remove sights, then rebuild the whole plan ---------------
+function operationLog(plan) {
+  const ops = plan.operations || [];
+  if (!ops.length) return "";
+  return `<div class="changes"><h3 style="margin:0 0 8px;font-size:15px">Your customisations</h3><ul>${
+    ops.map((op) => `<li class="${op.applied ? "yes" : "no"}">${op.applied ? "✓" : "✕"} ${esc(op.message)}</li>`).join("")}</ul>
+    <button class="mini" id="reset-custom" style="margin-top:6px">Undo customisations</button></div>`;
+}
+
 function changeLog(plan) {
   if (!plan.edits || !plan.edits.length) return "";
   return `<div class="changes"><h3 style="margin:0 0 8px;font-size:15px">Your changes</h3><ul>${
@@ -436,6 +542,28 @@ async function runEdits(newEdits) {
   }
 }
 
+async function runOperations(operations) {
+  if (!lastRequest || !operations.length) return;
+  customisations = customisations.concat(operations);
+  $("status").textContent = "Recalculating…";
+  $("go").disabled = true;
+  try {
+    const response = await fetch("/itinerary/customize", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ base: lastRequest, operations: customisations }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      customisations = customisations.slice(0, -operations.length);
+      $("status").textContent = payload.detail || "Could not apply that change.";
+      return;
+    }
+    render(payload);
+  } finally {
+    $("go").disabled = false; $("status").textContent = "";
+  }
+}
+
 async function offerDays(sight, city, host) {
   $("status").textContent = "Checking where it fits\u2026";
   const response = await fetch("/itinerary/placement-options", {
@@ -474,12 +602,41 @@ async function offerDays(sight, city, host) {
 }
 
 document.addEventListener("click", (event) => {
+  const tip = event.target.closest("[data-tip]");
+  const extend = event.target.closest("[data-extend]");
+  const activity = event.target.closest("[data-activity]");
+
+  if (tip) {
+    const chosen = (window._tips || [])[Number(tip.dataset.tip)];
+    if (chosen) {
+      const { endpoint, ...operation } = chosen.action;
+      runOperations([operation]);
+    }
+    return;
+  }
+  if (extend) {
+    runOperations([{ operation: "extend_day", day: Number(extend.dataset.extend),
+                     hours: Number(extend.dataset.hours) }]);
+    return;
+  }
+  if (activity) {
+    const name = prompt("What would you like to add? (e.g. Dinner at Ambrai)");
+    if (!name) return;
+    const at = prompt('What time? e.g. "20:00" — leave blank to fit it in anywhere') || null;
+    const length = Number(prompt("How many hours?", "1.5")) || 1.5;
+    runOperations([{ operation: "add_activity", day: Number(activity.dataset.activity),
+                     name, at, duration_hours: length }]);
+    return;
+  }
+
   const addBtn = event.target.closest("[data-add-sight]");
   const choose = event.target.closest("[data-choose-sight]");
   const swap = event.target.closest("[data-swap]");
   const drop = event.target.closest("[data-drop]");
   const retry = event.target.closest("[data-try-sight]");
   const reset = event.target.closest("#reset-edits");
+  const resetCustom = event.target.closest("#reset-custom");
+  if (resetCustom) { customisations = []; runOperations([]); $("form").dispatchEvent(new Event("submit")); return; }
 
   if (addBtn) offerDays(addBtn.dataset.addSight, addBtn.dataset.city, addBtn.closest(".addable"));
   if (choose) {
@@ -516,6 +673,71 @@ document.addEventListener("click", (event) => {
 });
 
 loadCities();
+
+// --- Drag and drop -------------------------------------------------------------------------
+// Dropping on a day moves the stop there; dropping on another stop swaps the two. Both go
+// through /itinerary/customize, so the plan is rebuilt rather than patched in the browser.
+let dragging = null;
+
+document.addEventListener("dragstart", (event) => {
+  const row = event.target.closest("li[data-sight]");
+  if (!row) return;
+  dragging = { sight: row.dataset.sight, day: Number(row.dataset.fromDay) };
+  row.classList.add("dragging");
+  event.dataTransfer.effectAllowed = "move";
+  try { event.dataTransfer.setData("text/plain", row.dataset.sight); } catch (_) {}
+});
+
+document.addEventListener("dragend", () => {
+  document.querySelectorAll(".dragging, .drop-target").forEach((node) =>
+    node.classList.remove("dragging", "drop-target"));
+  dragging = null;
+});
+
+document.addEventListener("dragover", (event) => {
+  if (!dragging) return;
+  const row = event.target.closest("li[data-sight]");
+  const section = event.target.closest("section.day[data-day]");
+  if (!row && !section) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+  document.querySelectorAll(".drop-target").forEach((node) => node.classList.remove("drop-target"));
+  (row || section).classList.add("drop-target");
+});
+
+document.addEventListener("drop", (event) => {
+  if (!dragging) return;
+  const row = event.target.closest("li[data-sight]");
+  const section = event.target.closest("section.day[data-day]");
+  event.preventDefault();
+  const source = dragging;
+  dragging = null;
+  document.querySelectorAll(".dragging, .drop-target").forEach((node) =>
+    node.classList.remove("dragging", "drop-target"));
+
+  if (row && row.dataset.sight !== source.sight) {
+    const targetDay = Number(row.dataset.fromDay);
+    if (targetDay === source.day) {
+      // Same day: a reorder. Send the order the list now implies.
+      const order = [...row.closest("ol").querySelectorAll("li[data-sight]")]
+        .map((node) => node.dataset.sight)
+        .filter((name) => name !== source.sight);
+      const at = order.indexOf(row.dataset.sight);
+      order.splice(at, 0, source.sight);
+      runOperations([{ operation: "reorder", day: targetDay, order }]);
+    } else {
+      runOperations([{ operation: "swap", sight: source.sight, day: source.day,
+                       with_sight: row.dataset.sight, with_day: targetDay }]);
+    }
+    return;
+  }
+  if (section) {
+    const targetDay = Number(section.dataset.day);
+    if (targetDay !== source.day) {
+      runOperations([{ operation: "move", sight: source.sight, from_day: source.day, to_day: targetDay }]);
+    }
+  }
+});
 </script>
 </body>
 </html>

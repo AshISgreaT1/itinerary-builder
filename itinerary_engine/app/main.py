@@ -14,12 +14,15 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .builder import PinnedSight, PlanningError, PlanRequest, build_itinerary
+from .builder import CustomActivity, PinnedSight, PlanningError, PlanRequest, build_itinerary
+from .customize import Operation, apply_operations
 from .edits import SightEdit, apply_edits, placement_options
 from .data_loader import get_dataset
 from .datacheck import run_checks
-from .models import AdjustRequest, ItineraryRequest, ItineraryResponse, PlacementQuery
+from .models import (AdjustRequest, CustomizeRequest, ItineraryRequest, ItineraryResponse,
+                     PlacementQuery, SuggestRequest)
 from .normalization import normalize_key
+from .suggest import suggestions_for
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -114,6 +117,14 @@ def _plan_request(request: ItineraryRequest) -> PlanRequest:
         include_descriptions=request.include_descriptions,
         pinned_sights=[PinnedSight(sight=p.sight, city=p.city, day=p.day) for p in request.pinned_sights],
         excluded_sights=list(request.excluded_sights),
+        city_days=dict(request.city_days),
+        extra_day_hours={int(day): float(hours) for day, hours in request.extra_day_hours.items()},
+        day_order={int(day): list(order) for day, order in request.day_order.items()},
+        sight_times={int(day): dict(times) for day, times in request.sight_times.items()},
+        custom_activities=[
+            CustomActivity(name=a.name, day=a.day, duration_hours=a.duration_hours, at=a.at, note=a.note)
+            for a in request.custom_activities
+        ],
     )
 
 
@@ -155,6 +166,44 @@ def adjust_itinerary(request: AdjustRequest) -> dict:
             [SightEdit(action=e.action, sight=e.sight, city=e.city, day=e.day, replaces=e.replaces) for e in request.edits],
         )
         return payload
+    except PlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/itinerary/customize", tags=["planning"])
+def customize_itinerary(request: CustomizeRequest) -> dict:
+    """Change a generated plan: move, swap, reorder, retime, lengthen a day, or add your own.
+
+    Each operation is applied to the *request* and the plan is then rebuilt, so the route,
+    the clock, the day budgets and the validation report all stay consistent. The response
+    is the rebuilt itinerary with ``operations`` saying what each one did, and fresh
+    ``suggestions`` for whatever is still worth improving.
+    """
+    try:
+        plan_request = _plan_request(request.base)
+        payload, outcomes = apply_operations(
+            get_dataset(),
+            plan_request,
+            [Operation(**op.model_dump()) for op in request.operations],
+        )
+        payload["operations"] = [outcome.as_dict() for outcome in outcomes]
+        payload["suggestions"] = suggestions_for(payload, get_dataset(), plan_request.pace)
+        return payload
+    except PlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/itinerary/suggestions", tags=["planning"])
+def itinerary_suggestions(request: SuggestRequest) -> dict:
+    """What could be improved about this plan, each with the call that would do it.
+
+    Nothing is changed. Every suggestion carries an ``action`` that can be sent straight
+    back to ``/itinerary/customize``.
+    """
+    try:
+        plan_request = _plan_request(request.base)
+        payload = build_itinerary(plan_request)
+        return suggestions_for(payload, get_dataset(), plan_request.pace)
     except PlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
