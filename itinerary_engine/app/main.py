@@ -121,6 +121,7 @@ def _plan_request(request: ItineraryRequest) -> PlanRequest:
         extra_day_hours={int(day): float(hours) for day, hours in request.extra_day_hours.items()},
         day_order={int(day): list(order) for day, order in request.day_order.items()},
         sight_times={int(day): dict(times) for day, times in request.sight_times.items()},
+        day_starts={int(day): str(at) for day, at in request.day_starts.items()},
         custom_activities=[
             CustomActivity(name=a.name, day=a.day, duration_hours=a.duration_hours, at=a.at, note=a.note)
             for a in request.custom_activities

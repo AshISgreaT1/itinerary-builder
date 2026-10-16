@@ -333,6 +333,15 @@ its own timeline.
 | `reallocate` | change the split of days between cities |
 | `pin` / `drop` | add or remove a sight |
 | `add_activity` | add something of your own -- a dinner, a show |
+| `swap_days` | exchange two whole days |
+| `set_day_start` | start a day earlier or later than 09:00 |
+| `set_pace` | change the pace of the whole trip without starting again |
+
+**All of it is reachable after generating.** The plan comes back with a *Customise this trip*
+panel: one click moves a day between cities (the total is fixed, so every click is a valid
+split), another changes the pace. Each day carries its own controls -- lengthen it, set when it
+starts, add your own activity -- and each stop can be dragged to another day, swapped with a
+stop on another day, replaced or removed. Nothing has to be re-entered.
 
 **Every operation is checked against its own intent.** A stop dragged onto a full day does
 not quietly disappear: the change is rolled back and the response says what would make room
@@ -348,6 +357,12 @@ days the user never touched.
 the stop cap -- one more stop per `EXTRA_HOURS_PER_STOP` (2h). Validation allows the longer
 day and notes it rather than failing; the 20:00 clock limit still applies, so the extra hours
 buy sights, not miracles.
+
+**Rearranging never shrinks the trip.** Beyond each operation's own intent, one invariant
+holds across all of them: a change that would drop a must-visit, or leave the trip with fewer
+stops than it had, is undone and explained. Trading two stops for three is a better trip and
+is allowed; losing one quietly is not. Changing the *shape* of the trip -- the pace, the city
+split, a day's length -- is exempt, because changing what fits is the point.
 
 **Your own plans are time on the clock.** A custom activity has no coordinates, so it costs
 no travel -- it is simply time the day owes to something, counted in
@@ -480,7 +495,7 @@ already in the workbook. On `sample_dataset_v4_clean.xlsx` it reports 69 finding
 python -m pytest tests -q
 ```
 
-197 tests: dataset loading and month parsing, clustering determinism, pace and distance caps
+204 tests: dataset loading and month parsing, clustering determinism, pace and distance caps
 on real plans, seasonal filtering, day-allocation fairness, the API endpoints, travel
 realism (missing route data, overnight legs, travel-only days), departure-day reservations,
 hotel-night consistency, the Goa December and June/September cases, fault injection
@@ -507,7 +522,9 @@ the workbook), and customisation (day splits that do and do not add up, lengthen
 their stop cap, a move that cannot fit being rolled back rather than losing the sight, a
 manual move leaving other days alone, swaps, reorders, custom activities landing on the clock
 and in the totals, a user's slot clash not blocking the plan, the advised time matching where
-the sight actually is, suggestions carrying actions that apply cleanly, and both endpoints).
+the sight actually is, suggestions carrying actions that apply cleanly, and both endpoints), and the trip-wide controls (pace changed after the fact, a day started
+early, two days swapped wholesale, a cross-city day swap refused with the reason, and the
+no-shrinking invariant held across move, swap and add).
 
 ## Layout
 

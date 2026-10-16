@@ -19,6 +19,9 @@ ones a drag-and-drop UI needs:
 ``pin``           add a sight, optionally to a given day
 ``drop``          remove a sight
 ``add_activity``  add something of your own (dinner, a show)
+``swap_days``     exchange two days wholesale
+``set_day_start`` start a day earlier or later than 09:00
+``set_pace``      change the pace of the whole trip without starting again
 """
 
 from __future__ import annotations
@@ -29,8 +32,8 @@ from .builder import CustomActivity, PinnedSight, PlanningError, PlanRequest, bu
 from .data_loader import Dataset
 from .normalization import normalize_key
 
-OPERATIONS = {"retime", "move", "swap", "reorder", "to_morning", "extend_day",
-              "reallocate", "pin", "drop", "add_activity"}
+OPERATIONS = {"retime", "move", "swap", "swap_days", "reorder", "to_morning", "extend_day",
+              "set_day_start", "set_pace", "reallocate", "pin", "drop", "add_activity"}
 
 
 @dataclass
@@ -52,6 +55,7 @@ class Operation:
     note: str = ""
     with_sight: str | None = None
     with_day: int | None = None
+    pace: str | None = None
 
 
 @dataclass
@@ -141,7 +145,7 @@ def apply_operations(
             raise PlanningError(f"Unknown operation '{op.operation}'. Known: {', '.join(sorted(OPERATIONS))}.")
         candidate, message = _apply_one(dataset, current, payload, op)
         rebuilt = build_itinerary(candidate, dataset)
-        problem = _unmet_intent(op, rebuilt)
+        problem = _unmet_intent(op, rebuilt) or _would_lose_sights(op, payload, rebuilt)
         if problem:
             outcomes.append(OperationOutcome(op.operation, False, problem))
             continue
@@ -149,6 +153,38 @@ def apply_operations(
         outcomes.append(OperationOutcome(op.operation, True, message))
 
     return payload, outcomes
+
+
+def _scheduled(payload: dict) -> set[str]:
+    return {normalize_key(sight["sight"]) for day in payload.get("days", []) for sight in day["sights"]}
+
+
+def _would_lose_sights(op: Operation, before: dict, after: dict) -> str | None:
+    """The invariant no customisation may break: rearranging must not lose a stop.
+
+    Changing the shape of the trip (the pace, the city split, a day's length) legitimately
+    changes what fits. Moving stops around does not -- if a swap would quietly drop a sight
+    because the day it landed on has no room, the swap is not what the user asked for.
+    """
+    if op.operation in {"drop", "set_pace", "reallocate", "extend_day"}:
+        return None
+    gone = _scheduled(before) - _scheduled(after)
+    if not gone:
+        return None
+    was = [sight for day in before.get("days", []) for sight in day["sights"]
+           if normalize_key(sight["sight"]) in gone]
+    # Re-planning may legitimately trade stops around -- two out, three in is a better trip,
+    # not a loss. What must never happen is the trip getting smaller, or a must-visit going
+    # quietly missing.
+    must_visits = sorted(sight["sight"] for sight in was if sight.get("must_visit"))
+    shrank = len(_scheduled(after)) < len(_scheduled(before))
+    if not must_visits and not shrank:
+        return None
+    names = must_visits or sorted(sight["sight"] for sight in was)
+    listed = ", ".join(f"'{name}'" for name in names[:3])
+    what = "the must-visit" if must_visits else ""
+    return (f"That change was undone because it would have dropped {what} {listed} from the trip. "
+            f"Lengthen the day first (extend_day), or remove something deliberately.").replace("  ", " ")
 
 
 def _unmet_intent(op: Operation, payload: dict) -> str | None:
@@ -260,6 +296,41 @@ def _apply_one(dataset: Dataset, request: PlanRequest, payload: dict,
             return replace(request, extra_day_hours=extra), f"Day {op.day} back to the normal pace."
         extra[op.day] = float(op.hours)
         return replace(request, extra_day_hours=extra), f"Day {op.day} lengthened by {op.hours:.1f}h."
+
+    if op.operation == "swap_days":
+        if op.day is None or op.with_day is None:
+            raise PlanningError("swap_days needs a day and a with_day.")
+        first, second = _order_of(payload, op.day), _order_of(payload, op.with_day)
+        if not first and not second:
+            raise PlanningError(f"Days {op.day} and {op.with_day} are both empty.")
+        city_a = next((d.get("city") for d in payload.get("days", []) if d["day"] == op.day), None)
+        city_b = next((d.get("city") for d in payload.get("days", []) if d["day"] == op.with_day), None)
+        if city_a != city_b:
+            raise PlanningError(
+                f"Day {op.day} is in {city_a} and day {op.with_day} is in {city_b}; swapping them would "
+                f"move sights to a city they are not in. Use reallocate to change the split instead."
+            )
+        request = _freeze(request, payload, {normalize_key(name) for name in first + second})
+        for name in first:
+            request = _pin(request, name, city_a, op.with_day)
+        for name in second:
+            request = _pin(request, name, city_b, op.day)
+        return request, f"Days {op.day} and {op.with_day} swapped."
+
+    if op.operation == "set_day_start":
+        if op.day is None or not op.at:
+            raise PlanningError('set_day_start needs a day and a time, e.g. {"day": 2, "at": "07:30"}.')
+        starts = dict(request.day_starts)
+        starts[op.day] = op.at
+        return replace(request, day_starts=starts), f"Day {op.day} now starts at {op.at}."
+
+    if op.operation == "set_pace":
+        if not op.pace:
+            raise PlanningError("set_pace needs a pace: relaxed, moderate or active.")
+        pace = op.pace.strip().lower()
+        if pace not in {"relaxed", "moderate", "active"}:
+            raise PlanningError(f"Unknown pace '{op.pace}'. Use relaxed, moderate or active.")
+        return replace(request, pace=pace), f"Pace changed to {pace}."
 
     if op.operation == "reallocate":
         if not op.city_days:

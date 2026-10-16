@@ -323,6 +323,8 @@ def build_day_schedule(
     laid out again from later in the morning -- the shift a human agent would make.
     """
     schedule = _lay_out_day(day, dataset, patterns, pace_hours_available)
+    if day.get("requested_start"):
+        return schedule  # the user set the start; the engine does not second-guess it
     # Smallest shift first: rescuing one evening sight by starting at 13:24 beats a shift
     # big enough for all of them that runs the day past the evening limit.
     for shift in _shifts_worth_trying(schedule):
@@ -390,7 +392,13 @@ def _lay_out_day(
 
     # The order was already settled by the planner (geography, time of day, then the habits
     # in past itineraries); the schedule only puts a clock against it.
-    now = (TRANSFER_START_HOUR if transfer else DAY_START_HOUR) + start_shift
+    # A start the user chose wins over both the default and the engine's own late-start
+    # retry: they know when they want to get up.
+    chosen_start = _clock_to_hours(day.get("requested_start"))
+    if chosen_start is not None:
+        now = chosen_start
+    else:
+        now = (TRANSFER_START_HOUR if transfer else DAY_START_HOUR) + start_shift
 
     # 1. The drive, with any en-route stops taken along it.
     if transfer:

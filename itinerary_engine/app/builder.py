@@ -102,6 +102,9 @@ class PlanRequest:
     custom_activities: list[CustomActivity] = field(default_factory=list)
     #: Times the user asked for, by day number then sight name: ``{2: {"Lake Pichola": "16:30"}}``.
     sight_times: dict[int, dict[str, str]] = field(default_factory=dict)
+    #: Start times the user chose, by day number: ``{2: "07:30"}``. An early start buys
+    #: daylight the pace allowance cannot.
+    day_starts: dict[int, str] = field(default_factory=dict)
 
     def pins_for_city(self, city_key: str) -> list[PinnedSight]:
         return [pin for pin in self.pinned_sights if pin.city is None or normalize_key(pin.city) == city_key]
@@ -575,6 +578,9 @@ def _attach_customisations(payload: dict, request: PlanRequest) -> None:
             for sight in day["sights"]:
                 if normalize_key(sight["sight"]) in position:
                     sight["user_pinned"] = True
+        start = request.day_starts.get(number)
+        if start:
+            day["requested_start"] = start
         activities = request.activities_for_day(number)
         if activities:
             day["custom_activities"] = [

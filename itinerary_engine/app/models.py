@@ -56,6 +56,8 @@ class ItineraryRequest(BaseModel):
     day_order: dict[int, list[str]] = Field(default_factory=dict)
     #: Times asked for, by day number then sight: {2: {"Lake Pichola": "16:30"}}.
     sight_times: dict[int, dict[str, str]] = Field(default_factory=dict)
+    #: Start times chosen per day number, e.g. {2: "07:30"}.
+    day_starts: dict[int, str] = Field(default_factory=dict)
     custom_activities: list[CustomActivityIn] = []
 
     @field_validator("cities")
@@ -290,8 +292,9 @@ class ItineraryResponse(BaseModel):
 class OperationIn(BaseModel):
     """One post-generation customisation (see ``app/customize.py``)."""
 
-    operation: Literal["retime", "move", "swap", "reorder", "to_morning", "extend_day",
-                       "reallocate", "pin", "drop", "add_activity"]
+    operation: Literal["retime", "move", "swap", "swap_days", "reorder", "to_morning",
+                       "extend_day", "set_day_start", "set_pace", "reallocate", "pin", "drop",
+                       "add_activity"]
     sight: str | None = None
     city: str | None = None
     day: int | None = Field(None, ge=1)
@@ -306,6 +309,7 @@ class OperationIn(BaseModel):
     note: str = ""
     with_sight: str | None = None
     with_day: int | None = Field(None, ge=1)
+    pace: Literal["relaxed", "moderate", "active"] | None = None
 
 
 class CustomizeRequest(BaseModel):

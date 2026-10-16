@@ -108,6 +108,18 @@
   .tip-conflict { background: rgba(37, 99, 235, 0.06); border-color: rgba(37, 99, 235, 0.25); }
   .tip-capacity, .tip-balance { background: rgba(16, 185, 129, 0.06); border-color: rgba(16, 185, 129, 0.25); }
   .day-controls { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 18px 10px; }
+  .trip-panel .alloc { margin: 0 18px 14px; }
+  .alloc-head { display: flex; justify-content: space-between; font-size: 12px; letter-spacing: .04em;
+                text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+  .alloc-row { display: grid; grid-template-columns: 1fr auto auto auto 90px; gap: 8px;
+               align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
+  .alloc-city { font-weight: 600; }
+  .alloc-n { min-width: 22px; text-align: center; font-variant-numeric: tabular-nums; }
+  .alloc-nights, .alloc-note { color: var(--muted); font-size: 12.5px; }
+  .pace-row { display: flex; gap: 8px; }
+  .mini.on { background: var(--brand); color: #fff; border-color: var(--brand); }
+  .exchange { margin: 6px 18px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; }
+  .exchange button { margin: 3px 4px 0 0; }
   .sights li[draggable="true"] { cursor: grab; }
   .sights li.dragging { opacity: 0.45; }
   .sights li.drop-target { outline: 2px dashed var(--accent); outline-offset: 2px; border-radius: 8px; }
@@ -368,6 +380,8 @@ function dayCard(day) {
             ${sight.description ? `<div class="desc">${esc(sight.description)}</div>` : ""}
           </div>
           <div class="sight-actions">
+            <button class="mini" data-exchange="${esc(sight.sight)}" data-day="${day.day}"
+              title="swap with a stop on another day">Swap</button>
             <button class="mini" data-swap="${esc(sight.sight)}" data-city="${esc(day.city)}" data-day="${day.day}">Replace</button>
             <button class="mini" data-drop="${esc(sight.sight)}" data-city="${esc(day.city)}">Remove</button>
           </div>
@@ -400,6 +414,7 @@ function dayCard(day) {
       <button class="mini" data-extend="${day.day}" data-hours="1.5">+1.5h on this day</button>
       ${(budget.extra_hours || 0) > 0
         ? `<button class="mini" data-extend="${day.day}" data-hours="0">reset +${hours(budget.extra_hours)}</button>` : ""}
+      <button class="mini" data-start="${day.day}">start ${esc(schedule.starts || "09:00")}</button>
       <button class="mini" data-activity="${day.day}">+ your own activity</button>
     </div>`;
 
@@ -437,6 +452,7 @@ function render(plan) {
         </div>`).join("")}</div>`
     : "";
 
+  const trip = tripPanel(plan);
   const tips = (plan.suggestions || {}).suggestions || [];
   const tipPanel = tips.length
     ? `<section class="day tips"><h2>Suggestions</h2>
@@ -475,11 +491,47 @@ function render(plan) {
     <div class="where" style="color:var(--muted);font-size:13px">${esc(plan.request.pace)} pace · ${nights}${
       summary.departure_day_reserved_for ? ` · departure: ${esc(summary.departure_day_reserved_for)}` : ""}</div>
     ${stats}${validationBanner(plan.validation)}${route}
-    ${tipPanel}${plan.days.map(dayCard).join("")}${operationLog(plan)}${changeLog(plan)}${slotNote}${addPanel(plan)}${missed}${closed}`;
+    ${trip}${tipPanel}${plan.days.map(dayCard).join("")}${operationLog(plan)}${changeLog(plan)}${slotNote}${addPanel(plan)}${missed}${closed}`;
   window.scrollTo({ top: $("out").offsetTop - 20, behavior: "smooth" });
 }
 
 // --- editing: add, replace or remove sights, then rebuild the whole plan ---------------
+// Everything about the trip as a whole that can be changed without starting again.
+function tripPanel(plan) {
+  const split = plan.summary?.days_per_city || {};
+  const cities = Object.keys(split);
+  const pace = plan.request?.pace || "moderate";
+  const total = Object.values(split).reduce((sum, days) => sum + days, 0);
+  const rows = cities.map((city) => `
+    <div class="alloc-row">
+      <span class="alloc-city">${esc(city)}</span>
+      <button class="mini" data-days="${esc(city)}" data-delta="-1"
+        ${split[city] <= 1 ? "disabled" : ""} title="one day less here">&minus;</button>
+      <b class="alloc-n">${split[city]}</b>
+      <button class="mini" data-days="${esc(city)}" data-delta="1"
+        ${cities.length < 2 ? "disabled" : ""} title="one day more here">+</button>
+      <span class="alloc-nights">${split[city]} day${split[city] === 1 ? "" : "s"}</span>
+    </div>`).join("");
+
+  return `<section class="day trip-panel">
+      <h2>Customise this trip</h2>
+      <div class="sub">Change it here and the whole plan is rebuilt around you — route, times and
+        checks included. Nothing needs re-entering.</div>
+      <div class="alloc">
+        <div class="alloc-head">Days per city <span>${total} of ${total} allocated</span></div>
+        ${rows}
+        ${cities.length < 2 ? `<div class="alloc-note">Add a second city to split days between them.</div>` : ""}
+      </div>
+      <div class="alloc">
+        <div class="alloc-head">Pace</div>
+        <div class="pace-row">
+          ${["relaxed", "moderate", "active"].map((name) =>
+            `<button class="mini ${name === pace ? "on" : ""}" data-pace="${name}">${name}</button>`).join("")}
+        </div>
+      </div>
+    </section>`;
+}
+
 function operationLog(plan) {
   const ops = plan.operations || [];
   if (!ops.length) return "";
@@ -605,6 +657,63 @@ document.addEventListener("click", (event) => {
   const tip = event.target.closest("[data-tip]");
   const extend = event.target.closest("[data-extend]");
   const activity = event.target.closest("[data-activity]");
+  const moveDay = event.target.closest("[data-days]");
+  const paceBtn = event.target.closest("[data-pace]");
+  const startBtn = event.target.closest("[data-start]");
+  const exchange = event.target.closest("[data-exchange]");
+  const pickExchange = event.target.closest("[data-exchange-with]");
+
+  if (moveDay) {
+    // One click always keeps the total: the day comes from (or goes to) the roomiest city.
+    const split = { ...(lastPlan?.summary?.days_per_city || {}) };
+    const city = moveDay.dataset.days;
+    const delta = Number(moveDay.dataset.delta);
+    const others = Object.keys(split).filter((name) => name !== city);
+    const partner = delta > 0
+      ? others.sort((a, b) => split[b] - split[a])[0]
+      : others.sort((a, b) => split[a] - split[b])[0];
+    if (!partner || (delta > 0 && split[partner] <= 1)) {
+      $("status").textContent = "No other city has a day to spare.";
+      return;
+    }
+    split[city] += delta;
+    split[partner] -= delta;
+    runOperations([{ operation: "reallocate", city_days: split }]);
+    return;
+  }
+  if (paceBtn) { runOperations([{ operation: "set_pace", pace: paceBtn.dataset.pace }]); return; }
+  if (startBtn) {
+    const at = prompt("What time should this day start? e.g. 07:30", "08:00");
+    if (at) runOperations([{ operation: "set_day_start", day: Number(startBtn.dataset.start), at }]);
+    return;
+  }
+  if (exchange) {
+    const host = exchange.closest("li");
+    host.querySelectorAll(".exchange").forEach((node) => node.remove());
+    const mine = exchange.dataset.exchange;
+    const myDay = Number(exchange.dataset.day);
+    // Swapping is between days; within a day it is a reorder, which dragging already does.
+    const others = (lastPlan?.days || []).filter((day) => day.day !== myDay).flatMap((day) =>
+      day.sights.filter((s) => s.sight !== mine && !s.en_route)
+        .map((s) => ({ sight: s.sight, day: day.day })));
+    if (!others.length) {
+      $("status").textContent = "No stop on another day to swap with — drag to reorder within a day.";
+      return;
+    }
+    const picker = document.createElement("div");
+    picker.className = "exchange";
+    picker.innerHTML = `<div class="alloc-nights">Swap '${esc(mine)}' with:</div>` +
+      others.map((o) => `<button class="mini" data-exchange-with="${esc(o.sight)}"
+        data-mine="${esc(mine)}" data-their-day="${o.day}">${esc(o.sight)} (day ${o.day})</button>`).join("");
+    host.appendChild(picker);
+    return;
+  }
+  if (pickExchange) {
+    runOperations([{ operation: "swap", sight: pickExchange.dataset.mine,
+                     with_sight: pickExchange.dataset.exchangeWith,
+                     with_day: Number(pickExchange.dataset.theirDay) }]);
+    return;
+  }
 
   if (tip) {
     const chosen = (window._tips || [])[Number(tip.dataset.tip)];

@@ -316,3 +316,71 @@ def test_a_rollback_hint_fits_the_day_it_describes(dataset):
         if transfer_day.get("transfer") and transfer_day["available_hours"] <= 0:
             assert "taken up by the journey" in message
             assert "swap with one of ." not in message
+
+
+# --- the whole trip, changed after the fact -------------------------------------------------
+def test_pace_can_be_changed_after_generating(dataset, udaipur):
+    base = build_itinerary(udaipur, dataset)
+    faster, outcomes = apply_operations(dataset, udaipur, [Operation(operation="set_pace", pace="active")])
+    assert outcomes[0].applied
+    assert faster["request"]["pace"] == "active"
+    assert faster["summary"]["total_sights"] >= base["summary"]["total_sights"]
+    assert faster["validation"]["passed"], faster["validation"]["issues"]
+
+
+def test_an_unknown_pace_is_refused(dataset, udaipur):
+    with pytest.raises(PlanningError) as error:
+        apply_operations(dataset, udaipur, [Operation(operation="set_pace", pace="frantic")])
+    assert "relaxed, moderate or active" in str(error.value)
+
+
+def test_a_day_can_be_started_earlier(dataset, udaipur):
+    plan, outcomes = apply_operations(dataset, udaipur, [
+        Operation(operation="set_day_start", day=2, at="07:30")])
+    assert outcomes[0].applied
+    assert next(d for d in plan["days"] if d["day"] == 2)["schedule"]["starts"] == "07:30"
+    assert plan["validation"]["passed"], plan["validation"]["issues"]
+
+
+def test_two_days_can_be_swapped_wholesale(dataset, udaipur):
+    base = build_itinerary(udaipur, dataset)
+    first, third = names(base, 1), names(base, 3)
+    plan, outcomes = apply_operations(dataset, udaipur, [
+        Operation(operation="extend_day", day=3, hours=2.0),
+        Operation(operation="swap_days", day=1, with_day=3)])
+    if outcomes[-1].applied:
+        assert set(first) <= set(names(plan, 3)), "day 1's stops should now be on day 3"
+        assert set(third) <= set(names(plan, 1))
+        assert plan["validation"]["passed"], plan["validation"]["issues"]
+    else:
+        assert "undone" in outcomes[-1].message
+
+
+def test_swapping_days_in_different_cities_is_refused(dataset):
+    with pytest.raises(PlanningError) as error:
+        apply_operations(
+            dataset,
+            PlanRequest(cities=["Jaipur", "Udaipur"], duration_days=6, pace="moderate"),
+            [Operation(operation="swap_days", day=1, with_day=6)],
+        )
+    assert "Use reallocate" in str(error.value)
+
+
+def test_no_customisation_may_lose_a_must_visit(dataset, udaipur):
+    """The invariant behind every rearrangement: the trip may change shape, not shrink."""
+    base = build_itinerary(udaipur, dataset)
+    before = {s["sight"] for day in base["days"] for s in day["sights"]}
+    must_before = {s["sight"] for day in base["days"] for s in day["sights"] if s.get("must_visit")}
+
+    for operation in [
+        Operation(operation="swap_days", day=1, with_day=3),
+        Operation(operation="move", sight=base["days"][2]["sights"][0]["sight"], to_day=1),
+        Operation(operation="add_activity", day=1, name="Long lunch", duration_hours=3.0),
+    ]:
+        plan, outcomes = apply_operations(dataset, udaipur, [operation])
+        after = {s["sight"] for day in plan["days"] for s in day["sights"]}
+        if outcomes[0].applied:
+            assert must_before <= after, f"{operation.operation} lost a must-visit"
+            assert len(after) >= len(before), f"{operation.operation} shrank the trip"
+        else:
+            assert after == before, f"{operation.operation} was undone but changed the plan"
