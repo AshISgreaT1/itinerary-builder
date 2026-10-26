@@ -337,3 +337,23 @@ class SuggestRequest(BaseModel):
     """Body of ``POST /itinerary/suggestions``."""
 
     base: ItineraryRequest
+
+
+class ActivitySearchQuery(BaseModel):
+    """Body of ``POST /itinerary/activity-search``: what has been typed so far."""
+
+    text: str = Field(..., min_length=1, max_length=120)
+    #: The trip, so results can be ranked against what is already planned. Optional: without
+    #: it the whole dataset is searched.
+    base: ItineraryRequest | None = None
+    #: Cities to search, when there is no trip to take them from.
+    cities: list[str] = []
+    limit: int = Field(8, ge=1, le=25)
+
+
+class ActivitySuggestQuery(BaseModel):
+    """Body of ``POST /itinerary/activity-suggestions``."""
+
+    base: ItineraryRequest
+    day: int | None = Field(None, ge=1)
+    limit: int = Field(12, ge=1, le=40)

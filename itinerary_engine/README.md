@@ -36,6 +36,8 @@ python -m app.cli --cities Manali Kasol --days 5 --pace moderate --from Delhi --
 | POST | `/itinerary/adjust` | Add, replace or remove sights and rebuild the plan |
 | POST | `/itinerary/customize` | Move, swap, reorder, retime, lengthen a day, re-split the trip, add your own activity |
 | POST | `/itinerary/suggestions` | What could be improved, each with the call that would do it |
+| POST | `/itinerary/activity-search` | Find a sight from a partial or misspelt name |
+| POST | `/itinerary/activity-suggestions` | What is worth adding to this trip, unprompted |
 | POST | `/itinerary/placement-options` | Which days could hold a sight, and what would have to move |
 | GET | `/cities` | Cities that can be planned, with sight counts |
 | GET | `/cities/{city}/sights` | A city's canonical sights in priority order |
@@ -141,6 +143,35 @@ estimates). Delete the cache file and the engine behaves exactly as it did befor
 itself a data check: 16 coordinates in this dataset sit more than 2 km from any road, and
 the worst -- Leh / Nakeela at 13.3 km -- is rounded to two decimal places in a region where
 that matters. They are reported by `python -m app.datacheck --kind coordinate_far_from_road`.
+
+## Grouping nearby stops
+
+Clustering decides which sights share a day before any day has a clock. The time-of-day
+groups inside a day then stretch the route -- a day runs morning stops, then afternoon, then
+evening, which is right for the traveller and wrong for the odometer. Measured across 88
+days, 17% drove more than two kilometres further than their own stops allowed.
+
+`refine_grouping()` sweeps each city's days again afterwards. For every pair of days it tries
+each single move and each pairwise swap, keeping a change only when the driving gets shorter
+*and* both days still pass every rule -- budget, stop cap, leg limits, evening capacity,
+arrival-day distance. Feasibility is checked with `evaluate_day()`, the same function the
+packer and the edit API use, so the refinement cannot invent a day the rest of the engine
+would reject.
+
+| | before | after |
+| --- | --- | --- |
+| driving hours per sight | 0.391 | **0.377** |
+| days driving well over their best order | 17% | 15% |
+| sights scheduled | 315 | 315 |
+
+Two things are held back from it. A **pinned** sight never moves -- the refinement optimises,
+it does not overrule the user. A **must-visit on the arrival day** never moves either: day 1
+carries the city's headline sights on purpose, and a kilometre of driving is not worth
+trading that away.
+
+The search is pruned geometrically: a stop is only tested against another day when it is
+nearer that day's stops (within `REFINE_MARGIN_KM`). Without the prune the same result costs
+six times the runtime; with it the whole pass is about 0.2s across three plans.
 
 ## Travel realism
 
@@ -308,6 +339,7 @@ impossible one. Past 13 h it needs an overnight bus or train, and past
 | Arrival day stays in town | `ARRIVAL_DAY_MAX_KM` | 25 km from the centre |
 | Hard time slots | `HARD_TIME_SLOTS`, `TIME_WINDOWS` | evening 16:30-20:00, sunset 16:30-19:30 |
 | Re-homing a missed slot | `MAX_SLOT_ROUNDS`, `MAX_SLOT_REPAIRS` | 6 rounds, 2 target days each |
+| Regrouping days to cut driving | `REFINE_PASSES`, `REFINE_MARGIN_KM` | 2 sweeps, 2 km |
 | Stop made during a drive | `EN_ROUTE_MAX_DETOUR_KM`, `EN_ROUTE_MAX_STOPS` | 15 km off the road, 3 stops |
 | Longest pure travel day | `TRAVEL_DAY_MAX_DRIVE_HOURS` | 13 h driving |
 | Wrong-city detection | `WRONG_CITY_KM` | 120 km from the city centre |
@@ -386,6 +418,28 @@ shows you what is left.
 A `retime` is only offered when it can actually be taken: suggesting 16:30 to two sights at
 once is advice nobody can act on, so the engine checks the evening's remaining room first and
 falls through to `move_day`.
+
+## Adding something: search that forgives typing
+
+"Add your own activity" searches the dataset rather than taking a name on trust. `app/lookup.py`
+matches in four widening steps and says which one hit, so the caller shows a list instead of
+guessing:
+
+| How | Example |
+| --- | --- |
+| `exact` | `city palace` -> City Palace |
+| `contains` | `bagore haveli` -> Bagore ki Haveli |
+| `fuzzy` | `sajangarh` -> Sajjangarh fort, `city plce` -> City Palace |
+| `sounds-like` | same consonant skeleton, for a phonetic spelling |
+
+Generosity has a floor. Nonsense matches nothing rather than returning the least-bad row, and
+phonetic matching needs at least three consonants -- `lake` once matched *Bhartiya Lok Kala
+Mandal* on a two-consonant skeleton.
+
+A **Suggested** button lists what is worth adding without typing: the must-visit sights the
+plan could not fit come first, each carrying the reason it was held back, then the generic
+activities (a dinner, a spa, a morning walk). Picking a dataset sight adds it as a real stop,
+routed and timed; only something that matches nothing becomes a free-text note on the day.
 
 ## Two kinds of validation
 
@@ -466,6 +520,30 @@ curl -X POST http://127.0.0.1:8000/itinerary/adjust   -H "Content-Type: applicat
 Each edit comes back in `edits[]` with `applied`, `placed_on_day`, a plain-English
 `message` and, when it failed, `suggestions`.
 
+## The printed itinerary
+
+Printing produces a separate customer-facing document, built from the plan -- not the app with
+parts hidden by CSS. That distinction is the point: hiding the screen UI rule by rule means
+every panel added later leaks onto the customer's printout. `@media print` hides
+`.wrap > *:not(#print-doc)` wholesale and shows the document instead, so new screen features
+are invisible to the printer by default.
+
+The document carries the trip title and length, then each day: the day number, city, the
+transfer when there is one, and a time / activity table with a one-sentence description from
+the dataset. It ends with what the itinerary covers and what it does not. Budgets, validation
+reports, suggestions, drag handles and every other working detail stay on screen.
+
+**Only what the engine can stand behind is listed as included.** Sightseeing as planned, local
+travel, the intercity transfers with their mode -- all facts from the plan. The engine models
+no hotels, meals or prices, so those are listed as *not* included rather than promised; a
+printed promise the engine cannot keep is worse than a blank line. There is a test for this.
+
+Times round to the nearest five minutes. Rounding starts down and ends up was the first
+attempt and made consecutive rows overlap on paper (`12:50` then `12:45`), which reads as a
+mistake even when the plan underneath is sound; rounding every instant the same way keeps one
+row's end exactly the next row's start. Page setup is A4 with 14mm margins and no day split
+across a page break.
+
 ## Dataset quality report
 
 The planner is only as sensible as the rows it reads, so the same rules run against the
@@ -495,7 +573,7 @@ already in the workbook. On `sample_dataset_v4_clean.xlsx` it reports 69 finding
 python -m pytest tests -q
 ```
 
-204 tests: dataset loading and month parsing, clustering determinism, pace and distance caps
+253 tests: dataset loading and month parsing, clustering determinism, pace and distance caps
 on real plans, seasonal filtering, day-allocation fairness, the API endpoints, travel
 realism (missing route data, overnight legs, travel-only days), departure-day reservations,
 hotel-night consistency, the Goa December and June/September cases, fault injection
@@ -524,7 +602,13 @@ manual move leaving other days alone, swaps, reorders, custom activities landing
 and in the totals, a user's slot clash not blocking the plan, the advised time matching where
 the sight actually is, suggestions carrying actions that apply cleanly, and both endpoints), and the trip-wide controls (pace changed after the fact, a day started
 early, two days swapped wholesale, a cross-city day swap refused with the reason, and the
-no-shrinking invariant held across move, swap and add).
+no-shrinking invariant held across move, swap and add), grouping (refined days still obey
+every limit, no hard slot leaves its window, pinned sights and day-1 must-visits are left
+alone, and refining is measured against the same plan unrefined rather than an absolute bar),
+typo-tolerant search (nine spellings of real sights, nonsense matching nothing, short words
+not matching by sound, and both endpoints), and the printed document (A4 setup, page breaks,
+the app chrome hidden wholesale, consistent time rounding, and nothing promised that the
+engine does not model).
 
 ## Layout
 
@@ -532,6 +616,7 @@ no-shrinking invariant held across move, swap and add).
 app/
   config.py         tunable rules and thresholds
   customize.py      post-generation operations (move, swap, extend, reallocate, ...)
+  lookup.py         typo-tolerant search over the dataset, and what to suggest
   suggest.py        what to do about a plan, as actions rather than complaints
   osrm.py           builds the measured-distance cache (run once, needs OSRM)
   roadcache.py      reads it; the planner never calls the network

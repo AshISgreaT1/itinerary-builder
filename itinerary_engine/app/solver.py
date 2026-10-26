@@ -9,6 +9,7 @@ day runs out of hours before a compact one does.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import combinations
 
 import pandas as pd
 
@@ -21,6 +22,8 @@ from .config import (
     MAX_DAY_ROUTE_KM,
     MAX_LEG_KM,
     EXTRA_HOURS_PER_STOP,
+    REFINE_MARGIN_KM,
+    REFINE_PASSES,
     MAX_SIGHTS_PER_DAY,
     ARRIVAL_DAY_MAX_KM,
     HARD_TIME_SLOTS,
@@ -574,4 +577,173 @@ def plan_city(
             packed.local_travel_hours = refilled.local_travel_hours
             packed.route_km, packed.max_leg_km = refilled.route_km, refilled.max_leg_km
             scheduled = {sight["sight"] for day in packed_days for sight in day.sights}
+
+    refine_grouping(packed_days, universe, pace)
     return packed_days
+
+
+def _frame_for(universe: pd.DataFrame, names: list[str]) -> pd.DataFrame:
+    """The planner's rows for these sight names, in this order."""
+    if not names:
+        return universe.iloc[0:0]
+    by_name = {str(row["sight"]): index for index, row in universe.iterrows()}
+    wanted = [by_name[name] for name in names if name in by_name]
+    return universe.loc[wanted]
+
+
+def _day_cost(frame: pd.DataFrame, slot: DaySlot, pace: str,
+              memo: dict | None = None) -> float | None:
+    """Driving hours for this set on this day, or None when the day could not hold it.
+
+    The search tries the same set against the same day many times over, and evaluating one
+    is the expensive part, so results are memoised per (day, set of stops).
+    """
+    if frame.empty:
+        return 0.0
+    key = (slot.day, frozenset(frame["sight"]))
+    if memo is not None and key in memo:
+        return memo[key]
+    verdict = evaluate_day(frame, slot, pace)
+    cost = None if not verdict["fits"] else float(_day_metrics(verdict["ordered"], slot)[0])
+    if memo is not None:
+        memo[key] = cost
+    return cost
+
+
+def refine_grouping(packed_days: list[PackedDay], universe: pd.DataFrame, pace: str) -> None:
+    """Group nearby stops together by moving and swapping between days.
+
+    Clustering decides which stops belong together before any day has a clock, and the
+    time-of-day groups inside a day then stretch the route: across the dataset 17% of days
+    drove more than two kilometres further than their own stops allow. This pass takes each
+    pair of days in a city and tries every single move and every pairwise swap, keeping only
+    changes that shorten the driving while both days still pass every rule -- the budget,
+    the stop cap, the leg limits, the evening capacity, the arrival-day distance. Feasibility
+    is checked with :func:`evaluate_day`, the same function the packer and the edit API use,
+    so nothing here can quietly invent a day the rest of the engine would reject.
+    """
+    movable = [day for day in packed_days
+               if day.slot.transfer is None and not day.slot.travel_only and day.sights]
+    pinned = set()
+    if "_forced_day" in universe.columns:
+        pinned = {str(row["sight"]) for _, row in universe.iterrows() if not pd.isna(row.get("_forced_day"))}
+
+    memo: dict = {}
+    coords = {str(row["sight"]): (float(row["lat"]), float(row["lon"]))
+              for _, row in universe.iterrows() if not pd.isna(row.get("lat"))}
+
+    def centre(names: list[str]) -> tuple[float, float] | None:
+        points = [coords[name] for name in names if name in coords]
+        if not points:
+            return None
+        return (sum(p[0] for p in points) / len(points), sum(p[1] for p in points) / len(points))
+
+    def nearer_to(name: str, target: tuple[float, float] | None,
+                  home: tuple[float, float] | None) -> bool:
+        """Is this stop closer to the other day's stops than to its own?
+
+        The whole search is "which day do these belong to", so only a stop that is actually
+        nearer the other group is worth evaluating. Without this filter every pair of stops
+        on every pair of days gets a full feasibility check, and a plan takes 14 seconds.
+        """
+        if name not in coords or target is None or home is None:
+            return False
+        here = road_km(coords[name][0], coords[name][1], home[0], home[1])
+        there = road_km(coords[name][0], coords[name][1], target[0], target[1])
+        # A small margin lets near-ties through: a stop a kilometre further from the other
+        # group can still shorten the route once the order is re-solved.
+        return there < here + REFINE_MARGIN_KM
+
+    for _ in range(REFINE_PASSES):
+        improved = False
+        for first, second in combinations(movable, 2):
+            if first.slot.city_key != second.slot.city_key:
+                continue
+            here = [sight["sight"] for sight in first.sights]
+            there = [sight["sight"] for sight in second.sights]
+            base = _day_cost(_frame_for(universe, here), first.slot, pace, memo)
+            other = _day_cost(_frame_for(universe, there), second.slot, pace, memo)
+            if base is None or other is None:
+                continue
+            best = (base + other, None)
+            my_centre, their_centre = centre(here), centre(there)
+
+            for name in here:
+                if name in pinned or _protected(first, name, universe):
+                    continue
+                if not nearer_to(name, their_centre, my_centre):
+                    continue
+                left, right = [x for x in here if x != name], there + [name]
+                cost = _pair_cost(universe, left, right, first, second, pace, memo)
+                if cost is not None and cost < best[0] - 1e-6:
+                    best = (cost, (left, right))
+            for name in there:
+                if name in pinned or _protected(second, name, universe):
+                    continue
+                if not nearer_to(name, my_centre, their_centre):
+                    continue
+                left, right = here + [name], [x for x in there if x != name]
+                cost = _pair_cost(universe, left, right, first, second, pace, memo)
+                if cost is not None and cost < best[0] - 1e-6:
+                    best = (cost, (left, right))
+            for mine in here:
+                for yours in there:
+                    if mine in pinned or yours in pinned:
+                        continue
+                    if _protected(first, mine, universe) or _protected(second, yours, universe):
+                        continue
+                    if not (nearer_to(mine, their_centre, my_centre)
+                            or nearer_to(yours, my_centre, their_centre)):
+                        continue
+                    left = [x for x in here if x != mine] + [yours]
+                    right = [x for x in there if x != yours] + [mine]
+                    cost = _pair_cost(universe, left, right, first, second, pace, memo)
+                    if cost is not None and cost < best[0] - 1e-6:
+                        best = (cost, (left, right))
+
+            if best[1] is not None:
+                left, right = best[1]
+                _rebuild(first, _frame_for(universe, left), pace)
+                _rebuild(second, _frame_for(universe, right), pace)
+                improved = True
+        if not improved:
+            break
+
+
+def _protected(packed: PackedDay, name: str, universe: pd.DataFrame) -> bool:
+    """A must-visit on the arrival day stays there.
+
+    Day 1 carries the city's headline sights on purpose (the agent itineraries put 85% of
+    their day-1 stops in that bracket). Shaving a kilometre off the driving is not worth
+    trading the first day's reason for being there.
+    """
+    if not packed.slot.is_arrival:
+        return False
+    rows = universe[universe["sight"] == name]
+    return not rows.empty and bool(rows.iloc[0].get("must_visit_flag", False))
+
+
+def _pair_cost(universe: pd.DataFrame, left: list[str], right: list[str],
+               first: PackedDay, second: PackedDay, pace: str, memo: dict) -> float | None:
+    """Combined driving for two days after a proposed change, or None if either breaks."""
+    here = _day_cost(_frame_for(universe, left), first.slot, pace, memo)
+    if here is None:
+        return None
+    there = _day_cost(_frame_for(universe, right), second.slot, pace, memo)
+    return None if there is None else here + there
+
+
+def _rebuild(packed: PackedDay, frame: pd.DataFrame, pace: str) -> None:
+    """Put a new set of sights on a day and recompute everything it reports."""
+    if frame.empty:
+        packed.sights = []
+        packed.sightseeing_hours = packed.buffer_hours = packed.local_travel_hours = 0.0
+        packed.route_km = packed.max_leg_km = 0.0
+        return
+    ordered = _ordered(frame, packed.slot)
+    travel, route_km, max_leg = _day_metrics(ordered, packed.slot)
+    packed.sights = [_sight_payload(row) for _, row in ordered.iterrows()]
+    packed.sightseeing_hours = round(float(ordered["duration_hours"].sum()), 2)
+    packed.buffer_hours = round(SIGHT_BUFFER_HOURS * len(ordered), 2)
+    packed.local_travel_hours = round(travel, 2)
+    packed.route_km, packed.max_leg_km = round(route_km, 1), round(max_leg, 1)

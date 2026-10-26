@@ -19,8 +19,9 @@ from .customize import Operation, apply_operations
 from .edits import SightEdit, apply_edits, placement_options
 from .data_loader import get_dataset
 from .datacheck import run_checks
-from .models import (AdjustRequest, CustomizeRequest, ItineraryRequest, ItineraryResponse,
-                     PlacementQuery, SuggestRequest)
+from .models import (ActivitySearchQuery, ActivitySuggestQuery, AdjustRequest, CustomizeRequest,
+                     ItineraryRequest, ItineraryResponse, PlacementQuery, SuggestRequest)
+from .lookup import search, suggestions
 from .normalization import normalize_key
 from .suggest import suggestions_for
 
@@ -205,6 +206,40 @@ def itinerary_suggestions(request: SuggestRequest) -> dict:
         plan_request = _plan_request(request.base)
         payload = build_itinerary(plan_request)
         return suggestions_for(payload, get_dataset(), plan_request.pace)
+    except PlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/itinerary/activity-search", tags=["planning"])
+def activity_search(query: ActivitySearchQuery) -> dict:
+    """What the user might mean by what they have typed so far.
+
+    Tolerates partial names, typos and phonetic spellings ("bagore haveli", "sajangarh",
+    "city plce"), and says how each result matched so the caller can show a list rather
+    than guess. Sights come from the dataset only; generic activities (a dinner, a spa) are
+    offered alongside them and marked as such.
+    """
+    try:
+        payload = build_itinerary(_plan_request(query.base)) if query.base else None
+        cities = query.cities or (list(query.base.cities) if query.base else [])
+        return {
+            "query": query.text,
+            "matches": search(get_dataset(), query.text, cities, payload, limit=query.limit),
+        }
+    except PlanningError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/itinerary/activity-suggestions", tags=["planning"])
+def activity_suggestions(query: ActivitySuggestQuery) -> dict:
+    """Things worth adding to this trip, unprompted.
+
+    The sights the plan could not fit come first (most important first), because those are
+    what the traveller came for; generic activities follow as starting points.
+    """
+    try:
+        payload = build_itinerary(_plan_request(query.base))
+        return suggestions(get_dataset(), list(query.base.cities), payload, query.day, query.limit)
     except PlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

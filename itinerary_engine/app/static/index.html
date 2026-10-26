@@ -120,6 +120,22 @@
   .mini.on { background: var(--brand); color: #fff; border-color: var(--brand); }
   .exchange { margin: 6px 18px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; }
   .exchange button { margin: 3px 4px 0 0; }
+  .activity-panel { flex-basis: 100%; margin-top: 8px; padding: 10px; border: 1px solid var(--line);
+                    border-radius: 10px; background: var(--panel); }
+  .act-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .act-row input[type="text"] { flex: 1; min-width: 180px; padding: 7px 10px; border: 1px solid var(--line);
+                                border-radius: 8px; font: inherit; }
+  .act-row label { font-size: 12.5px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
+  .act-row input[type="number"], .act-row input[size="6"] { padding: 6px 8px; border: 1px solid var(--line);
+                                border-radius: 8px; font: inherit; width: 72px; }
+  .act-matches { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; max-height: 240px;
+                 overflow: auto; }
+  .act-match { text-align: left; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px;
+               background: #fff; cursor: pointer; font: inherit; display: flex; gap: 8px;
+               align-items: baseline; flex-wrap: wrap; }
+  .act-match:hover { border-color: var(--accent); background: rgba(37, 99, 235, 0.04); }
+  .act-why { color: var(--muted); font-size: 12px; }
+  .act-how { font-size: 11px; color: var(--accent); text-transform: uppercase; letter-spacing: .04em; }
   .sights li[draggable="true"] { cursor: grab; }
   .sights li.dragging { opacity: 0.45; }
   .sights li.drop-target { outline: 2px dashed var(--accent); outline-offset: 2px; border-radius: 8px; }
@@ -170,10 +186,40 @@
   .changes .no { color: var(--bad); }
   .changes .yes { color: var(--ok); }
   footer { margin-top: 28px; color: var(--muted); font-size: 12px; text-align: center; }
+  /* The screen app and the printed itinerary are two different documents. Printing shows
+     only the second, so nothing on screen -- controls, budgets, validation, suggestions --
+     has to be hidden rule by rule and nothing new leaks into the page by being added. */
+  #print-doc { display: none; }
   @media print {
-    form.card, .row, button { display: none !important; }
-    body { background: #fff; } .day, .stat { box-shadow: none; break-inside: avoid; }
+    @page { size: A4; margin: 14mm 13mm 16mm; }
+    .wrap > *:not(#print-doc), .hero, form.card { display: none !important; }
+    html, body { background: #fff; margin: 0; padding: 0; font-size: 10.5pt; color: #111; }
+    #print-doc { display: block; }
   }
+  #print-doc { font-family: "Segoe UI", system-ui, sans-serif; color: #111; }
+  .pr-head { border-bottom: 2px solid #111; padding-bottom: 8px; margin-bottom: 14px; }
+  .pr-title { font-size: 20pt; font-weight: 700; margin: 0 0 2px; letter-spacing: -0.01em; }
+  .pr-sub { font-size: 10pt; color: #444; }
+  .pr-day { break-inside: avoid; page-break-inside: avoid; margin: 0 0 14px; }
+  .pr-day-head { display: flex; justify-content: space-between; align-items: baseline;
+                 background: #f2f4f7; border-left: 3px solid #111; padding: 5px 9px; margin-bottom: 6px; }
+  .pr-day-no { font-weight: 700; font-size: 11pt; }
+  .pr-day-where { font-size: 9.5pt; color: #444; }
+  .pr-transfer { font-size: 9.5pt; padding: 4px 9px; background: #fafafa; border-left: 3px solid #bbb;
+                 margin-bottom: 6px; }
+  table.pr-items { width: 100%; border-collapse: collapse; }
+  table.pr-items td { vertical-align: top; padding: 4px 9px 5px 0; border-bottom: 1px solid #eee; }
+  td.pr-time { width: 86px; white-space: nowrap; font-variant-numeric: tabular-nums; color: #333; }
+  td.pr-what b { font-size: 10.5pt; }
+  .pr-note { color: #555; font-size: 9pt; display: block; margin-top: 1px; }
+  .pr-terms { break-inside: avoid; page-break-inside: avoid; margin-top: 16px;
+              border-top: 1px solid #ccc; padding-top: 10px; }
+  .pr-terms h3 { font-size: 10.5pt; margin: 0 0 4px; }
+  .pr-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .pr-terms ul { margin: 0; padding-left: 16px; }
+  .pr-terms li { font-size: 9.5pt; margin-bottom: 2px; }
+  .pr-foot { margin-top: 12px; border-top: 1px solid #ccc; padding-top: 6px;
+             font-size: 8.5pt; color: #666; }
 </style>
 </head>
 <body>
@@ -220,6 +266,7 @@
   </form>
 
   <div id="out"></div>
+  <div id="print-doc"></div>
   <footer>Deterministic engine · no pricing, flights or hotel selection · distances from the dataset's coordinates</footer>
 </div>
 
@@ -277,7 +324,11 @@ document.addEventListener("click", (event) => {
   if (remove) { chosen = chosen.filter((c) => c !== remove.dataset.remove); renderChosen(); renderSuggestions($("city-search").value); }
 });
 $("city-search").addEventListener("input", (event) => renderSuggestions(event.target.value));
-$("print").addEventListener("click", () => window.print());
+$("print").addEventListener("click", () => {
+  if (!lastPlan) { $("status").textContent = "Generate an itinerary first."; return; }
+  renderPrint(lastPlan);
+  window.print();
+});
 
 $("form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -486,6 +537,7 @@ function render(plan) {
     : "";
 
   lastPlan = plan;
+  renderPrint(plan);
   $("out").innerHTML = `
     <h2 style="margin:22px 0 0;letter-spacing:-.02em">${esc(plan.request.cities.join(" + "))}</h2>
     <div class="where" style="color:var(--muted);font-size:13px">${esc(plan.request.pace)} pace · ${nights}${
@@ -728,15 +780,22 @@ document.addEventListener("click", (event) => {
                      hours: Number(extend.dataset.hours) }]);
     return;
   }
-  if (activity) {
-    const name = prompt("What would you like to add? (e.g. Dinner at Ambrai)");
-    if (!name) return;
-    const at = prompt('What time? e.g. "20:00" — leave blank to fit it in anywhere') || null;
-    const length = Number(prompt("How many hours?", "1.5")) || 1.5;
-    runOperations([{ operation: "add_activity", day: Number(activity.dataset.activity),
-                     name, at, duration_hours: length }]);
+  if (activity) { openActivityPanel(Number(activity.dataset.activity), activity); return; }
+  if (event.target.closest("[data-close-activity]")) { closeActivityPanel(); return; }
+  if (event.target.closest("[data-suggested]")) { loadSuggested(); return; }
+  const pick = event.target.closest("[data-pick-activity]");
+  if (pick) {
+    const node = pick.dataset;
+    $("act-name").value = node.pickActivity;
+    if (node.pickHours) $("act-hours").value = node.pickHours;
+    if (node.pickAt) $("act-at").value = node.pickAt;
+    // A sight from the dataset is a real stop, not a free-text note: add it as one.
+    $("act-form").dataset.kind = node.pickKind || "activity";
+    $("act-form").dataset.sight = node.pickKind === "sight" ? node.pickActivity : "";
+    renderActivityMatches([]);
     return;
   }
+  if (event.target.closest("[data-add-activity-go]")) { submitActivity(); return; }
 
   const addBtn = event.target.closest("[data-add-sight]");
   const choose = event.target.closest("[data-choose-sight]");
@@ -782,6 +841,213 @@ document.addEventListener("click", (event) => {
 });
 
 loadCities();
+
+// --- The printed itinerary ------------------------------------------------------------------
+// Built from the plan, not from the page: the screen shows budgets, validation and controls
+// that a traveller has no use for, and hiding them one by one leaves every future addition
+// to leak into the print. Only what a customer needs is written here.
+// The planner works to the minute; a customer document should not. Every instant rounds to
+// the nearest five minutes the same way, so the end of one row is exactly the start of the
+// next -- rounding starts down and ends up instead made consecutive rows overlap on paper,
+// which reads as a mistake even though the underlying plan is sound.
+function roundClock(text) {
+  const [h, m] = String(text || "0:00").split(":").map(Number);
+  const total = Math.min(Math.round((h * 60 + m) / 5) * 5, 23 * 60 + 55);
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function printTime(block) {
+  return `${roundClock(block.start)}\u2013${roundClock(block.end)}`;
+}
+
+function firstSentence(text, limit) {
+  if (!text) return "";
+  const stop = text.indexOf(". ");
+  const out = stop > 30 ? text.slice(0, stop + 1) : text;
+  return out.length > limit ? out.slice(0, limit - 1).trimEnd() + "\u2026" : out;
+}
+
+// What this itinerary does and does not cover, taken from the plan itself. The engine does
+// not model hotels, meals or prices, so those are stated as not included rather than
+// promised -- a printed promise the engine cannot keep is worse than a blank page.
+function printTerms(plan) {
+  const transfers = plan.days.filter((day) => day.transfer && day.transfer.drive_hours !== null);
+  const enRoute = plan.days.some((day) => day.sights.some((s) => s.en_route));
+  const own = plan.days.some((day) => (day.schedule?.blocks || []).some((b) => b.kind === "custom"));
+  const included = [
+    `Sightseeing on ${plan.days.filter((d) => d.sights.length).length} day(s) as listed, in the order shown`,
+    "Travel time between sights within each city",
+  ];
+  if (transfers.length) {
+    included.push(`${transfers.length} intercity transfer(s) by ${
+      [...new Set(transfers.map((d) => d.transfer.mode || "road"))].join(" / ")}`);
+  }
+  if (enRoute) included.push("Stops made along the way during transfers");
+  if (own) included.push("Your own planned activities, as marked");
+
+  const excluded = [
+    "Accommodation",
+    "Meals, unless listed as an activity",
+    "Entry tickets, guide fees and camera charges",
+    "Flights and train tickets",
+    "Personal expenses, tips and anything not listed above",
+  ];
+  return { included, excluded };
+}
+
+function renderPrint(plan) {
+  const host = $("print-doc");
+  if (!host || !plan) return;
+  const cities = (plan.request?.cities || []).join(" \u00b7 ");
+  const summary = plan.summary || {};
+  const nights = Object.entries(summary.nights_per_city || {})
+    .map(([city, n]) => `${city} ${n}N`).join(", ");
+
+  const days = plan.days.map((day) => {
+    const blocks = (day.schedule?.blocks || []).filter((b) =>
+      ["sight", "transfer", "custom", "lunch", "check-in", "checkout"].includes(b.kind));
+    const rows = blocks.map((block) => {
+      const sight = day.sights.find((s) => s.sight === block.sight);
+      const note = block.kind === "sight"
+        ? firstSentence(sight?.description || "", 170)
+        : (block.kind === "transfer" ? block.detail : "");
+      return `<tr>
+          <td class="pr-time">${esc(printTime(block))}</td>
+          <td class="pr-what"><b>${esc(block.kind === "sight" ? block.sight : block.label)}</b>
+            ${note ? `<span class="pr-note">${esc(note)}</span>` : ""}</td>
+        </tr>`;
+    }).join("");
+
+    const transfer = day.transfer && day.transfer.drive_hours !== null
+      ? `<div class="pr-transfer"><b>${esc(day.transfer.from_city)} \u2192 ${esc(day.transfer.to_city)}</b>
+           \u00b7 ${esc(day.transfer.road_km ? Math.round(day.transfer.road_km) + " km" : "")}
+           ${esc(hours(day.transfer.drive_hours))} by ${esc(day.transfer.mode || "road")}</div>`
+      : "";
+
+    return `<section class="pr-day">
+        <div class="pr-day-head">
+          <span class="pr-day-no">Day ${day.day}</span>
+          <span class="pr-day-where">${esc(day.city)}${
+            day.is_arrival_day ? " \u00b7 arrival" : day.is_departure_day ? " \u00b7 departure" : ""}</span>
+        </div>
+        ${transfer}
+        ${rows ? `<table class="pr-items">${rows}</table>`
+               : `<div class="pr-note" style="padding:4px 9px">A free day \u2014 nothing scheduled.</div>`}
+      </section>`;
+  }).join("");
+
+  const terms = printTerms(plan);
+  host.innerHTML = `
+    <div class="pr-head">
+      <div class="pr-title">${esc(cities)}</div>
+      <div class="pr-sub">${summary.days} days${nights ? " \u00b7 " + esc(nights) : ""} \u00b7
+        ${summary.total_sights} sightseeing stops</div>
+    </div>
+    ${days}
+    <div class="pr-terms">
+      <div class="pr-cols">
+        <div><h3>Included</h3><ul>${terms.included.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>
+        <div><h3>Not included</h3><ul>${terms.excluded.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>
+      </div>
+      <div class="pr-foot">Timings are planned estimates and may shift with traffic, opening hours and
+        weather. Sights marked for a particular time of day are placed accordingly.</div>
+    </div>`;
+}
+
+// --- Adding something to a day ------------------------------------------------------------
+// The dataset is the authority on what exists, so the box searches it rather than taking a
+// free-text name on trust: a sight picked from the list is added as a real stop, and only
+// something that matches nothing becomes a note on the day.
+let activityDay = null;
+let searchTimer = null;
+
+function closeActivityPanel() {
+  document.querySelectorAll(".activity-panel").forEach((node) => node.remove());
+  activityDay = null;
+}
+
+function openActivityPanel(day, host) {
+  closeActivityPanel();
+  activityDay = day;
+  const panel = document.createElement("div");
+  panel.className = "activity-panel";
+  panel.innerHTML = `
+    <form id="act-form" data-kind="activity" onsubmit="return false">
+      <div class="act-row">
+        <input id="act-name" type="text" autocomplete="off" placeholder="Search sights, or type your own…">
+        <button class="mini" data-suggested="1" type="button">Suggested</button>
+        <button class="mini" data-close-activity="1" type="button" title="close">&times;</button>
+      </div>
+      <div id="act-matches" class="act-matches"></div>
+      <div class="act-row">
+        <label>at <input id="act-at" type="text" placeholder="20:00" size="6"></label>
+        <label>for <input id="act-hours" type="number" step="0.5" min="0.5" max="12" value="1.5">h</label>
+        <button class="mini" data-add-activity-go="1" type="button">Add to day ${day}</button>
+      </div>
+    </form>`;
+  host.closest(".day-controls").appendChild(panel);
+  const box = $("act-name");
+  box.focus();
+  box.addEventListener("input", () => {
+    clearTimeout(searchTimer);
+    $("act-form").dataset.kind = "activity";
+    searchTimer = setTimeout(() => searchActivities(box.value), 160);
+  });
+}
+
+async function searchActivities(text) {
+  if (!text || text.trim().length < 2) { renderActivityMatches([]); return; }
+  const response = await fetch("/itinerary/activity-search", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, base: lastRequest, limit: 8 }),
+  });
+  if (!response.ok) return;
+  renderActivityMatches((await response.json()).matches || []);
+}
+
+async function loadSuggested() {
+  const response = await fetch("/itinerary/activity-suggestions", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ base: lastRequest, day: activityDay, limit: 10 }),
+  });
+  if (!response.ok) return;
+  const data = await response.json();
+  renderActivityMatches([...(data.sights || []), ...(data.activities || [])], true);
+}
+
+function renderActivityMatches(matches, suggested) {
+  const host = $("act-matches");
+  if (!host) return;
+  if (!matches.length) { host.innerHTML = ""; return; }
+  host.innerHTML = matches.map((m) => {
+    const why = m.kind === "sight"
+      ? [m.city, m.best_time, m.duration_hours ? `${m.duration_hours}h` : "",
+         m.must_visit ? "★ must visit" : "",
+         m.scheduled_on ? `already on day ${m.scheduled_on}` : ""].filter(Boolean).join(" · ")
+      : "your own plan";
+    const how = (suggested || !m.how || m.how === "suggested" || m.how === "exact")
+      ? "" : `<span class="act-how">${esc(m.how)}</span>`;
+    return `<button class="act-match" type="button" data-pick-activity="${esc(m.name)}"
+        data-pick-kind="${esc(m.kind)}" data-pick-hours="${m.duration_hours || ""}"
+        data-pick-at="${esc(m.at || "")}">
+        <b>${esc(m.name)}</b>${how}<span class="act-why">${esc(why)}</span>
+        ${m.detail ? `<span class="act-why">${esc(m.detail)}</span>` : ""}
+      </button>`;
+  }).join("");
+}
+
+function submitActivity() {
+  const name = $("act-name").value.trim();
+  if (!name) { $("status").textContent = "Give it a name first."; return; }
+  const at = $("act-at").value.trim() || null;
+  const hours = Number($("act-hours").value) || 1.5;
+  const day = activityDay;
+  const isSight = $("act-form").dataset.kind === "sight" && $("act-form").dataset.sight === name;
+  closeActivityPanel();
+  runOperations([isSight
+    ? { operation: "pin", sight: name, day }
+    : { operation: "add_activity", day, name, at, duration_hours: hours }]);
+}
 
 // --- Drag and drop -------------------------------------------------------------------------
 // Dropping on a day moves the stop there; dropping on another stop swaps the two. Both go

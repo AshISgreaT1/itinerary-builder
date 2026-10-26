@@ -114,6 +114,14 @@ ARRIVAL_DAY_MAX_KM: Final[float] = 25.0
 MAX_STOPS_WITH_EXCURSION: Final[int] = 2
 #: Hours a user must add to a day before it may hold one more stop than the pace allows.
 EXTRA_HOURS_PER_STOP: Final[float] = 2.0
+#: How many times the grouping refinement sweeps a city's days looking for a shorter
+#: arrangement. Each sweep is O(days^2 x stops^2) on a handful of stops, and in practice
+#: nothing improves after the second.
+REFINE_PASSES: Final[int] = 2
+#: How much further from the other day's stops a stop may be and still be worth testing.
+#: Zero considers only clear-cut cases and misses re-orderings; too large and every pair of
+#: stops is evaluated against every day, which costs seconds per plan.
+REFINE_MARGIN_KM: Final[float] = 2.0
 #: A sight farther than this from its city centre is almost certainly filed under the
 #: wrong city (e.g. "sunset point" sitting 315 km from Jaisalmer).
 WRONG_CITY_KM: Final[float] = 120.0
