@@ -1,0 +1,31 @@
+# Render blueprint. Create the service from this file (New -> Blueprint) or copy the
+# settings below into a Web Service created by hand.
+#
+# The dataset and the measured-distance cache are committed to the repository, so the
+# service needs no disk, no database and no network access at runtime: it loads
+# data/sample_dataset_v4_clean.xlsx on the first request and serves from memory.
+services:
+  - type: web
+    name: itinerary-engine
+    runtime: python
+    plan: starter          # the free plan sleeps, and the first request then pays the
+                           # dataset load; starter keeps it warm. Free works for testing.
+    region: singapore      # nearest to the dataset's destinations; any region is fine
+    rootDir: itinerary_engine
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.3"
+      # The API keys other systems will send as X-API-Key. Comma-separated.
+      # `generateValue: true` makes Render create a random one on first deploy; read it
+      # from the dashboard and hand it to the calling team. Replace with `sync: false` if
+      # you would rather paste your own.
+      - key: ITINERARY_API_KEYS
+        generateValue: true
+      # Planning is CPU-bound and holds the dataset in memory, so one worker per instance
+      # is the right shape; scale with instances rather than workers.
+      - key: WEB_CONCURRENCY
+        value: "1"

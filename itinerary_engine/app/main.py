@@ -10,10 +10,12 @@ import logging
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .api_v1 import PREFIX as API_V1_PREFIX, API_VERSION, failed, router as api_v1_router
 from .builder import CustomActivity, PinnedSight, PlanningError, PlanRequest, build_itinerary
 from .customize import Operation, apply_operations
 from .edits import SightEdit, apply_edits, placement_options
@@ -26,15 +28,75 @@ from .normalization import normalize_key
 from .suggest import suggestions_for
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Deterministic Itinerary Engine",
     version="1.0.0",
     description=(
         "Builds logistically feasible, time-bounded, spatially clustered day plans from a "
-        "structured travel dataset. No pricing, flights or hotel selection."
+        "structured travel dataset. No pricing, flights or hotel selection.\n\n"
+        "**Integrating another system?** Use the `/api/v1` endpoints: a small, versioned "
+        "surface with one response envelope and an API key. The other endpoints belong to "
+        "this project's own UI and change with it."
     ),
+    openapi_tags=[
+        {"name": "public API v1",
+         "description": "The stable surface for other systems. Send `X-API-Key`; press "
+                        "**Authorize** above to try these here."},
+        {"name": "planning", "description": "Internal endpoints used by the planner UI."},
+        {"name": "catalogue", "description": "What the dataset contains."},
+        {"name": "meta", "description": "Health and data quality."},
+    ],
 )
+app.include_router(api_v1_router)
+
+
+# One envelope for the public API, and only for it: the UI endpoints keep the error shape
+# they already have, so adding this API changes nothing for the existing front end.
+def _is_public_api(request: Request) -> bool:
+    return request.url.path.startswith(API_V1_PREFIX)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    if not _is_public_api(request):
+        return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    details = [
+        {"field": ".".join(str(part) for part in error.get("loc", []) if part != "body"),
+         "problem": error.get("msg", "")}
+        for error in exc.errors()
+    ]
+    return JSONResponse(
+        status_code=422,
+        content=failed("invalid_request", "The request body did not validate.", details),
+    )
+
+
+@app.exception_handler(HTTPException)
+async def _http_error(request: Request, exc: HTTPException) -> JSONResponse:
+    if not _is_public_api(request):
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail},
+                            headers=getattr(exc, "headers", None))
+    codes = {401: "unauthorized", 403: "forbidden", 404: "not_found",
+             422: "unprocessable", 429: "rate_limited", 503: "unavailable"}
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=failed(codes.get(exc.status_code, "error"), str(exc.detail)),
+        headers=getattr(exc, "headers", None),
+    )
+
+
+@app.exception_handler(Exception)
+async def _unexpected_error(request: Request, exc: Exception) -> JSONResponse:
+    # Never leak a traceback to an integrator; the log keeps the detail.
+    logger.exception("Unhandled error on %s", request.url.path)
+    if not _is_public_api(request):
+        raise exc
+    return JSONResponse(
+        status_code=500,
+        content=failed("internal_error", "The engine failed to handle this request."),
+    )
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -54,12 +116,20 @@ def health() -> dict:
         dataset = get_dataset()
     except Exception as exc:  # dataset missing or malformed
         raise HTTPException(status_code=503, detail=f"Dataset unavailable: {exc}") from exc
+    import time
+
+    from .api_v1 import STARTED_AT, configured_keys
+
     return {
         "status": "ok",
         "dataset": dataset.source.name,
         "cities": len(dataset.cities),
         "sights": len(dataset.sights),
         "duplicate_names_merged": len(dataset.dedup.merges),
+        # Added for the public API; the keys above are unchanged for existing callers.
+        "api_version": API_VERSION,
+        "uptime_seconds": round(time.time() - STARTED_AT, 1),
+        "api_keys_configured": len(configured_keys()),
     }
 
 

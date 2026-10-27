@@ -27,6 +27,164 @@ Terminal version, handy while tuning the rules:
 python -m app.cli --cities Manali Kasol --days 5 --pace moderate --from Delhi --month 6
 ```
 
+## Public API (v1)
+
+Another system integrates through `/api/v1`. It is a facade over the same engine the UI
+calls -- not a second implementation -- with three differences that exist for the caller:
+one response envelope, an API key, and a frozen vocabulary (`destination`, `days`) so
+renaming an internal field is not a breaking change.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/health` | none | Liveness, dataset counts, uptime |
+| GET | `/api/v1/info` | key | Version, limits, what is and is not modelled |
+| POST | `/api/v1/itinerary` | key | Plan a trip |
+
+Open `/docs`, press **Authorize**, paste a key, and both endpoints are testable in the
+browser.
+
+### Authentication
+
+Keys come from the `ITINERARY_API_KEYS` environment variable, comma-separated, and are sent
+as `X-API-Key`. **With no keys configured the API returns 503 rather than running open** --
+a missing setting must never mean "let everyone in". For local work,
+`ITINERARY_API_ALLOW_ANONYMOUS=1` turns the check off explicitly.
+
+### Request
+
+```bash
+curl -X POST https://your-service.onrender.com/api/v1/itinerary \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your-key" \
+  -d '{
+    "destination": "Jaipur, Udaipur",
+    "days": 6,
+    "travellers": 2,
+    "budget": 60000,
+    "currency": "INR",
+    "traveller_type": "couple",
+    "pace": "moderate",
+    "start_month": 11
+  }'
+```
+
+`destination` takes one city, a comma-separated list, or a JSON array. `days` is 1-30 and
+`pace` is `relaxed` / `moderate` / `active` (5 / 7 / 9 sightseeing hours a day).
+`origin_city` charges day 1 with the journey in; `start_month` applies seasonal closures.
+
+### Response
+
+```json
+{
+  "success": true,
+  "data": {
+    "destination": ["Jaipur", "Udaipur"],
+    "days": 6,
+    "pace": "moderate",
+    "nights_per_city": {"Jaipur": 4, "Udaipur": 1},
+    "total_sights": 16,
+    "total_sightseeing_hours": 18.25,
+    "total_travel_hours": 13.69,
+    "feasible": true,
+    "warnings": [],
+    "not_included": [],
+    "itinerary": [
+      {
+        "day": 1, "city": "Jaipur", "is_arrival_day": true, "transfer": null,
+        "starts": "09:00", "ends": "15:18",
+        "sightseeing_hours": 4.0, "travel_hours": 1.3,
+        "items": [
+          {"start": "09:00", "end": "09:30", "kind": "check-in",
+           "title": "Arrival and hotel check-in, Jaipur", "description": "", "duration_hours": 0.5},
+          {"start": "09:54", "end": "10:09", "kind": "sight", "title": "Lassiwala",
+           "description": "A long-running lassi shop on MI Road\u2026",
+           "duration_hours": 0.25, "best_time": "any", "must_visit": false}
+        ]
+      }
+    ]
+  },
+  "meta": {
+    "api_version": "1.0.0",
+    "unused_inputs": {
+      "budget": "This engine does no pricing\u2026",
+      "travellers": "The engine plans time and distance, not vehicles or group logistics.",
+      "traveller_type": "\u2026does not predict how full a day is (ANOVA p=0.87). Use `pace` instead."
+    },
+    "echo": {"travellers": 2, "budget": 60000.0, "currency": "INR", "traveller_type": "couple"},
+    "took_ms": 4109,
+    "cached": false
+  }
+}
+```
+
+Errors use the same envelope, so a client parses one shape:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "invalid_request",
+    "message": "The request body did not validate.",
+    "details": [{"field": "days", "problem": "Input should be greater than or equal to 1"}]
+  },
+  "meta": {"api_version": "1.0.0"}
+}
+```
+
+`invalid_request` (422), `unauthorized` (401), `unprocessable` (422, e.g. an unknown city --
+the message lists the known ones), `unavailable` (503), `internal_error` (500). **The
+envelope applies to `/api/v1` only**; the UI endpoints keep the shapes they already had, and
+there is a test holding that line.
+
+### What the engine does not use
+
+`budget`, `travellers` and `traveller_type` are accepted, echoed back, and reported in
+`meta.unused_inputs` with the reason. They are not quietly ignored, because an integrator who
+believes `budget` did something is a support ticket waiting to happen:
+
+| Field | Why it does not change the plan |
+|---|---|
+| `budget` | The engine does no pricing. Only **2 of 196** past itineraries in the dataset carry a total price -- far too few to estimate from. |
+| `traveller_type` | Measured against those same itineraries it does not predict trip intensity: couples **2.63** stops a day, families **2.63**, groups **2.65** (ANOVA p=0.87). A mapping to pace would be invention, so `pace` is exposed directly. |
+| `travellers` | The engine models time and distance, not vehicles or group logistics. |
+
+A test asserts that four traveller types produce byte-identical plans, so if that ever stops
+being true the documentation has to change with the code.
+
+### Performance
+
+A cold plan takes roughly 2-5 seconds; the engine clusters, routes, schedules, validates and
+re-plans around time-of-day conflicts. Because planning is deterministic, identical requests
+are served from an in-process cache (`meta.cached`) in about a millisecond. The cache keys on
+everything that changes a plan -- cities, days, pace, origin, month.
+
+## Deploying on Render
+
+`render.yaml` is a blueprint: **New -> Blueprint** in Render, point it at this repository, and
+it creates the service. By hand instead:
+
+| Setting | Value |
+|---|---|
+| Root directory | `itinerary_engine` |
+| Build command | `pip install -r requirements.txt` |
+| Start command | `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
+| Health check path | `/health` |
+| Environment | `PYTHON_VERSION=3.12.3`, `ITINERARY_API_KEYS=<your keys>`, `WEB_CONCURRENCY=1` |
+
+The dataset and the measured-distance cache are committed (about 770 KB together), so the
+service needs no disk, database or network at runtime. One worker per instance: planning is
+CPU-bound and each worker holds its own copy of the dataset, so scale with instances.
+
+Smoke-test a deployment:
+
+```bash
+curl https://your-service.onrender.com/health
+curl -H "X-API-Key: your-key" https://your-service.onrender.com/api/v1/info
+```
+
+On Render's free plan the service sleeps when idle and the first request afterwards pays the
+dataset load as well as the plan, so allow ten seconds or so for a cold start.
+
 ## API
 
 | Method | Path | Purpose |
@@ -573,7 +731,7 @@ already in the workbook. On `sample_dataset_v4_clean.xlsx` it reports 69 finding
 python -m pytest tests -q
 ```
 
-253 tests: dataset loading and month parsing, clustering determinism, pace and distance caps
+285 tests: dataset loading and month parsing, clustering determinism, pace and distance caps
 on real plans, seasonal filtering, day-allocation fairness, the API endpoints, travel
 realism (missing route data, overnight legs, travel-only days), departure-day reservations,
 hotel-night consistency, the Goa December and June/September cases, fault injection
@@ -608,13 +766,18 @@ alone, and refining is measured against the same plan unrefined rather than an a
 typo-tolerant search (nine spellings of real sights, nonsense matching nothing, short words
 not matching by sound, and both endpoints), and the printed document (A4 setup, page breaks,
 the app chrome hidden wholesale, consistent time rounding, and nothing promised that the
-engine does not model).
+engine does not model), and the public API (the envelope, a key being required, failing
+closed when none is configured, every input validated, the three shapes `destination`
+accepts, unused inputs reported rather than ignored, traveller type provably not changing
+the plan while pace does, the cache keying on everything that matters, `/docs` advertising
+the key, and the UI endpoints keeping their own response shapes).
 
 ## Layout
 
 ```
 app/
   config.py         tunable rules and thresholds
+  api_v1.py         the public REST facade: envelope, API key, frozen vocabulary
   customize.py      post-generation operations (move, swap, extend, reallocate, ...)
   lookup.py         typo-tolerant search over the dataset, and what to suggest
   suggest.py        what to do about a plan, as actions rather than complaints
