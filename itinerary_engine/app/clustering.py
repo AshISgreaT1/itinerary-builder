@@ -13,7 +13,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from sklearn.cluster import KMeans
 
 from .config import EXCURSION_KM, RANDOM_SEED
 from .geo import road_km
@@ -32,6 +31,19 @@ class ClusterResult:
     @property
     def count(self) -> int:
         return len(self.clusters)
+
+
+def _kmeans(n_clusters: int, points):
+    """KMeans labels for these points, importing scikit-learn only when it is needed.
+
+    Importing sklearn costs about 2.5 seconds, and on a small instance that is 2.5 seconds
+    of every cold start -- paid before the health check can answer, even for a request that
+    never clusters anything. Deferring it to the first plan keeps boot fast; the warm-up on
+    startup then pays it in the background rather than on a traveller's first request.
+    """
+    from sklearn.cluster import KMeans
+
+    return KMeans(n_clusters=n_clusters, random_state=RANDOM_SEED, n_init=10)
 
 
 def mark_excursions(sights: pd.DataFrame, centre_lat: float, centre_lon: float) -> pd.DataFrame:
@@ -90,7 +102,7 @@ def cluster_city_sights(
         return ClusterResult(_sort_clusters(groups), "zone", excursions)
 
     coordinates = core[["lat", "lon"]].to_numpy(dtype=float)
-    kmeans = KMeans(n_clusters=n_clusters, random_state=RANDOM_SEED, n_init=10)
+    kmeans = _kmeans(n_clusters, None)
     labels = kmeans.fit_predict(coordinates)
     clusters = [core[labels == label] for label in range(n_clusters)]
     return ClusterResult(_sort_clusters(clusters), "kmeans", excursions)
@@ -99,7 +111,7 @@ def cluster_city_sights(
 def _merge_groups_by_centroid(groups: list[pd.DataFrame], n_clusters: int) -> list[pd.DataFrame]:
     """Merge zone groups down to ``n_clusters`` by clustering their centroids."""
     centroids = np.array([[g["lat"].mean(), g["lon"].mean()] for g in groups])
-    labels = KMeans(n_clusters=n_clusters, random_state=RANDOM_SEED, n_init=10).fit_predict(centroids)
+    labels = _kmeans(n_clusters, None).fit_predict(centroids)
     merged = []
     for label in range(n_clusters):
         members = [g for g, l in zip(groups, labels) if l == label]

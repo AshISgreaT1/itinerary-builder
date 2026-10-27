@@ -31,13 +31,13 @@ from __future__ import annotations
 
 import os
 import time
-from functools import lru_cache
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, field_validator
 
+from . import plancache
 from .builder import PlanningError, PlanRequest, build_itinerary
 from .data_loader import get_dataset
 
@@ -51,10 +51,6 @@ API_KEYS_ENV = "ITINERARY_API_KEYS"
 ALLOW_ANONYMOUS_ENV = "ITINERARY_API_ALLOW_ANONYMOUS"
 
 STARTED_AT = time.time()
-#: How many distinct plans to keep. The engine is deterministic -- the same inputs always
-#: produce the same plan -- so a repeat call can be served from memory instead of spending
-#: several seconds re-planning. Small, because each entry holds a full itinerary.
-PLAN_CACHE_SIZE = 64
 
 api_key_header = APIKeyHeader(
     name="X-API-Key",
@@ -303,14 +299,14 @@ def unused_inputs(request: ItineraryRequestV1) -> dict:
 
 
 # --- planning -------------------------------------------------------------------------------------
-@lru_cache(maxsize=PLAN_CACHE_SIZE)
 def _plan_cached(cities: tuple[str, ...], days: int, pace: str,
                  origin: str | None, month: int | None) -> dict:
-    """Plan a trip, remembering the result.
+    """Plan a trip. The remembering happens in :mod:`app.plancache`, inside the builder.
 
-    Safe only because planning is deterministic: the seed is fixed, distances come from a
-    file, and nothing consults a clock or a random source. If that ever stops being true
-    this cache has to go with it.
+    This used to keep its own cache on top of that one. Two caches with different
+    lifetimes and different keys is a bug waiting to happen, so the API now shares the
+    engine's -- which also means a plan built for the UI serves an API call, and the other
+    way round.
     """
     return build_itinerary(PlanRequest(
         cities=list(cities),
@@ -322,9 +318,7 @@ def _plan_cached(cities: tuple[str, ...], days: int, pace: str,
 
 
 def plan_cache_info() -> dict:
-    stats = _plan_cached.cache_info()
-    return {"hits": stats.hits, "misses": stats.misses, "size": stats.currsize,
-            "capacity": stats.maxsize}
+    return plancache.info()
 
 
 # --- endpoints ------------------------------------------------------------------------------------
@@ -374,7 +368,7 @@ def create_itinerary(body: ItineraryRequestV1, request: Request,
     module docstring for why each one does not change the result.
     """
     started = time.monotonic()
-    before = _plan_cached.cache_info().hits
+    before = plancache.info()["hits"]
     try:
         plan = _plan_cached(tuple(body.destination), body.days, body.pace,  # type: ignore[arg-type]
                             body.origin_city, body.start_month)
@@ -389,6 +383,6 @@ def create_itinerary(body: ItineraryRequestV1, request: Request,
         echo={"travellers": body.travellers, "budget": body.budget,
               "currency": body.currency, "traveller_type": body.traveller_type},
         took_ms=round((time.monotonic() - started) * 1000),
-        cached=_plan_cached.cache_info().hits > before,
+        cached=plancache.info()["hits"] > before,
         request_id=request.headers.get("x-request-id"),
     )

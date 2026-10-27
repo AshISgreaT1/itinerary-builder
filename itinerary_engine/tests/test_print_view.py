@@ -82,3 +82,34 @@ def test_the_print_button_builds_the_document_first(page):
 def test_the_document_is_rebuilt_whenever_the_plan_changes(page):
     """Every customisation re-renders the plan; the printout has to follow it."""
     assert re.search(r"lastPlan = plan;\s*\n\s*renderPrint\(plan\);", page)
+
+
+# --- the screen layout ---------------------------------------------------------------------
+def test_the_plan_is_split_into_tabs(page):
+    """One page with everything on it was the complaint; the split must not quietly undo."""
+    for piece in ['data-panel="itinerary"', 'data-panel="customise"',
+                  'data-panel="issues"', 'data-panel="add"']:
+        assert piece in page, f"missing {piece}"
+    assert "function showTab" in page
+    assert "let activeTab" in page
+
+
+def test_the_reading_view_carries_no_editing_controls(page):
+    """An agent reading the plan should see the trip, not the machinery."""
+    view = page[page.index("function dayView(day)"):]
+    view = view[:view.index("// A day is drawn twice")]
+    for control in ["data-exchange", "data-swap", "data-drop", "data-extend",
+                    "data-activity", "draggable", "day-controls", "class=\"bar\""]:
+        assert control not in view, f"{control} belongs on the Customise tab, not in the reading view"
+
+
+def test_the_open_tab_survives_a_rebuild(page):
+    """Editing rebuilds the plan; being thrown back to the first tab each time is maddening."""
+    assert "showTab(activeTab)" in page
+    assert "activeTab = id" in page
+
+
+def test_the_form_collapses_once_there_is_a_plan(page):
+    assert "function closeForm" in page and "function openForm" in page
+    assert "form.card.tucked { display: none; }" in page
+    assert 'id="change-trip"' in page, "there must be a way back to the form"

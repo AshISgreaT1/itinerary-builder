@@ -29,3 +29,7 @@ services:
       # is the right shape; scale with instances rather than workers.
       - key: WEB_CONCURRENCY
         value: "1"
+      # The plan cache lives in the worker's memory, so it is per instance. 256 plans is a
+      # few megabytes; drop it on a very small instance, or set 0 to switch caching off.
+      - key: ITINERARY_PLAN_CACHE
+        value: "256"

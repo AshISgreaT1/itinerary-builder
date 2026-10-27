@@ -30,8 +30,11 @@ class CustomActivityIn(BaseModel):
 
     name: str = Field(..., min_length=1)
     day: int = Field(..., ge=1)
-    duration_hours: float = Field(1.0, gt=0, le=12)
-    at: str | None = Field(None, description='Clock time, e.g. "20:00". Omit to let it fall where it fits.')
+    duration_hours: float = Field(1.0, gt=0, le=24,
+                                  description="Any length, up to a full day.")
+    at: str | None = Field(None, description='Clock time, e.g. "20:00" or "06:30". Any hour: the '
+                                             'day starts earlier or runs later to fit it. Omit to '
+                                             'let it fall where there is room.')
     note: str = ""
 
 
@@ -305,7 +308,7 @@ class OperationIn(BaseModel):
     order: list[str] = []
     city_days: dict[str, int] = Field(default_factory=dict)
     name: str | None = None
-    duration_hours: float | None = Field(None, gt=0, le=12)
+    duration_hours: float | None = Field(None, gt=0, le=24)
     note: str = ""
     with_sight: str | None = None
     with_day: int | None = Field(None, ge=1)

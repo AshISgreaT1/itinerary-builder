@@ -366,8 +366,13 @@ def test_swapping_days_in_different_cities_is_refused(dataset):
     assert "Use reallocate" in str(error.value)
 
 
-def test_no_customisation_may_lose_a_must_visit(dataset, udaipur):
-    """The invariant behind every rearrangement: the trip may change shape, not shrink."""
+def test_rearranging_never_loses_a_must_visit(dataset, udaipur):
+    """Moving stops around may change the shape of a trip, never shrink it.
+
+    Booking time of your own is the exception, and it has its own test: three hours for a
+    long lunch has to come from somewhere, and refusing it would be the engine overruling
+    the traveller.
+    """
     base = build_itinerary(udaipur, dataset)
     before = {s["sight"] for day in base["days"] for s in day["sights"]}
     must_before = {s["sight"] for day in base["days"] for s in day["sights"] if s.get("must_visit")}
@@ -375,7 +380,6 @@ def test_no_customisation_may_lose_a_must_visit(dataset, udaipur):
     for operation in [
         Operation(operation="swap_days", day=1, with_day=3),
         Operation(operation="move", sight=base["days"][2]["sights"][0]["sight"], to_day=1),
-        Operation(operation="add_activity", day=1, name="Long lunch", duration_hours=3.0),
     ]:
         plan, outcomes = apply_operations(dataset, udaipur, [operation])
         after = {s["sight"] for day in plan["days"] for s in day["sights"]}
@@ -384,3 +388,120 @@ def test_no_customisation_may_lose_a_must_visit(dataset, udaipur):
             assert len(after) >= len(before), f"{operation.operation} shrank the trip"
         else:
             assert after == before, f"{operation.operation} was undone but changed the plan"
+
+
+def test_your_own_plans_may_displace_a_sight_but_must_say_so(dataset, udaipur):
+    """The traveller wins; what it cost them is reported rather than discovered later."""
+    base = build_itinerary(udaipur, dataset)
+    before = {s["sight"] for day in base["days"] for s in day["sights"]}
+
+    plan, outcomes = apply_operations(
+        dataset, udaipur,
+        [Operation(operation="add_activity", day=1, name="Long lunch", duration_hours=4.0)])
+    assert outcomes[0].applied, "a booked activity is not the engine's to refuse"
+    after = {s["sight"] for day in plan["days"] for s in day["sights"]}
+    displaced = before - after
+    if displaced:
+        assert "no longer fit" in outcomes[0].message, outcomes[0].message
+        for name in list(displaced)[:3]:
+            assert name in outcomes[0].message or len(displaced) > 3
+    assert plan["validation"]["passed"], plan["validation"]["issues"]
+
+
+# --- lengthening a day adds room, it does not re-plan the trip ---------------------------------
+def test_extending_a_day_leaves_the_rest_of_the_plan_alone(dataset):
+    """Asking for more hours used to rearrange all four days and swap three stops for three."""
+    request = PlanRequest(cities=["Udaipur"], duration_days=4, pace="moderate")
+    before = build_itinerary(request, dataset)
+    after, outcomes = apply_operations(dataset, request,
+                                       [Operation(operation="extend_day", day=2, hours=1.5)])
+    assert outcomes[0].applied
+    for index, (was, now) in enumerate(zip(before["days"], after["days"]), start=1):
+        kept = [s["sight"] for s in was["sights"]]
+        current = [s["sight"] for s in now["sights"]]
+        assert set(kept) <= set(current), f"day {index} lost {set(kept) - set(current)}"
+        if index != 2:
+            assert kept == current, f"day {index} was rearranged by a change to day 2"
+    assert after["days"][1]["available_hours"] == pytest.approx(
+        before["days"][1]["available_hours"] + 1.5)
+
+
+def test_extra_hours_buy_extra_stops(dataset):
+    request = PlanRequest(cities=["Udaipur"], duration_days=4, pace="moderate")
+    before = build_itinerary(request, dataset)
+    after, _ = apply_operations(dataset, request,
+                                [Operation(operation="extend_day", day=2, hours=2.0)])
+    was = [s["sight"] for s in before["days"][1]["sights"]]
+    now = [s["sight"] for s in after["days"][1]["sights"]]
+    assert set(was) <= set(now) and len(now) > len(was), f"{was} -> {now}"
+    assert after["validation"]["passed"], after["validation"]["issues"]
+
+
+def test_setting_a_day_start_does_not_re_plan_it(dataset):
+    request = PlanRequest(cities=["Udaipur"], duration_days=4, pace="moderate")
+    before = build_itinerary(request, dataset)
+    after, outcomes = apply_operations(dataset, request,
+                                       [Operation(operation="set_day_start", day=2, at="07:30")])
+    assert outcomes[0].applied
+    assert [s["sight"] for s in after["days"][1]["sights"]] == \
+           [s["sight"] for s in before["days"][1]["sights"]]
+    assert after["days"][1]["schedule"]["starts"] == "07:30"
+
+
+# --- your own activity, at any hour and any length ------------------------------------------------
+@pytest.mark.parametrize("at, length", [
+    ("06:00", 2.0),    # before the engine's day begins
+    ("13:00", 2.0),    # in the middle of the sightseeing
+    ("21:30", 2.0),    # after the sights have closed
+    ("08:00", 12.0),   # the whole day
+    ("00:00", 24.0),   # all of it
+])
+def test_an_activity_lands_at_the_hour_it_was_asked_for(dataset, at, length):
+    request = PlanRequest(cities=["Udaipur"], duration_days=4, pace="moderate")
+    plan, outcomes = apply_operations(dataset, request, [
+        Operation(operation="add_activity", day=3, name="My plan", duration_hours=length, at=at)])
+    assert outcomes[0].applied, outcomes[0].message
+    day = next(d for d in plan["days"] if d["day"] == 3)
+    block = next(b for b in day["schedule"]["blocks"] if b["kind"] == "custom")
+    assert block["start"] == at, f"asked for {at}, got {block['start']}"
+    assert plan["validation"]["passed"], plan["validation"]["issues"]
+
+
+def test_an_activity_outside_sightseeing_hours_costs_no_sightseeing(dataset):
+    """Dinner at 21:30 must not push a temple off the morning."""
+    request = PlanRequest(cities=["Udaipur"], duration_days=4, pace="moderate")
+    before = build_itinerary(request, dataset)
+    for at in ["21:30", "06:00"]:
+        plan, _ = apply_operations(dataset, request, [
+            Operation(operation="add_activity", day=3, name="My plan", duration_hours=2.0, at=at)])
+        assert [s["sight"] for s in plan["days"][2]["sights"]] == \
+               [s["sight"] for s in before["days"][2]["sights"]], f"{at} displaced a sight"
+
+
+def test_a_whole_day_activity_leaves_no_room_for_sightseeing(dataset):
+    """And the day is laid out around it rather than cramming sights in afterwards."""
+    request = PlanRequest(cities=["Udaipur"], duration_days=4, pace="moderate")
+    plan, outcomes = apply_operations(dataset, request, [
+        Operation(operation="add_activity", day=3, name="Wedding", duration_hours=12.0, at="08:00")])
+    assert outcomes[0].applied
+    day = next(d for d in plan["days"] if d["day"] == 3)
+    assert day["sights"] == [], "a twelve-hour commitment leaves no day for sightseeing"
+    assert day["schedule"]["totals"]["your_own_plans"] == pytest.approx(12.0)
+
+
+def test_a_late_day_caused_by_your_own_plans_is_not_an_error(dataset):
+    request = PlanRequest(cities=["Udaipur"], duration_days=4, pace="moderate")
+    plan, _ = apply_operations(dataset, request, [
+        Operation(operation="add_activity", day=3, name="Late dinner", duration_hours=2.5, at="21:30")])
+    day = next(d for d in plan["days"] if d["day"] == 3)
+    assert not [flag for flag in day["schedule"]["flags"] if "past the" in flag], day["schedule"]["flags"]
+    assert any("because of what you added" in note for note in day["schedule"]["notes"])
+    assert plan["validation"]["passed"]
+
+
+def test_past_midnight_is_printed_as_such(dataset):
+    from app.schedule import clock
+
+    assert clock(26.7) == "02:42 (+1)"
+    assert clock(23.99) == "23:59"
+    assert clock(13.25) == "13:15"

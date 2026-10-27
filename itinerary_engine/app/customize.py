@@ -149,6 +149,10 @@ def apply_operations(
         if problem:
             outcomes.append(OperationOutcome(op.operation, False, problem))
             continue
+        lost = _displaced(payload, rebuilt) if op.operation == "add_activity" else []
+        if lost:
+            listed = ", ".join(f"'{name}'" for name in lost[:3])
+            message += f" {listed} no longer fit{'s' if len(lost) == 1 else ''} that day."
         current, payload = candidate, rebuilt
         outcomes.append(OperationOutcome(op.operation, True, message))
 
@@ -166,7 +170,10 @@ def _would_lose_sights(op: Operation, before: dict, after: dict) -> str | None:
     changes what fits. Moving stops around does not -- if a swap would quietly drop a sight
     because the day it landed on has no room, the swap is not what the user asked for.
     """
-    if op.operation in {"drop", "set_pace", "reallocate", "extend_day"}:
+    # Adding your own plans legitimately changes what else fits -- that is the whole point
+    # of booking three hours for something. Refusing it because a sight no longer fits
+    # would be the engine overruling the traveller; what it owes them is to say so.
+    if op.operation in {"drop", "set_pace", "reallocate", "extend_day", "add_activity"}:
         return None
     gone = _scheduled(before) - _scheduled(after)
     if not gone:
@@ -295,7 +302,12 @@ def _apply_one(dataset: Dataset, request: PlanRequest, payload: dict,
             extra.pop(op.day, None)
             return replace(request, extra_day_hours=extra), f"Day {op.day} back to the normal pace."
         extra[op.day] = float(op.hours)
-        return replace(request, extra_day_hours=extra), f"Day {op.day} lengthened by {op.hours:.1f}h."
+        # Longer hours should buy room, not a different holiday. Without freezing what is
+        # already planned, re-planning with a bigger budget was free to re-cluster the whole
+        # trip: asking for 1.5 more hours on day 2 rearranged all four days and swapped
+        # three of that day's stops for three others.
+        request = _freeze(replace(request, extra_day_hours=extra), payload, set())
+        return request, f"Day {op.day} lengthened by {op.hours:.1f}h."
 
     if op.operation == "swap_days":
         if op.day is None or op.with_day is None:
@@ -322,7 +334,9 @@ def _apply_one(dataset: Dataset, request: PlanRequest, payload: dict,
             raise PlanningError('set_day_start needs a day and a time, e.g. {"day": 2, "at": "07:30"}.')
         starts = dict(request.day_starts)
         starts[op.day] = op.at
-        return replace(request, day_starts=starts), f"Day {op.day} now starts at {op.at}."
+        # Starting earlier changes the clock, not the plan: keep the stops where they are.
+        request = _freeze(replace(request, day_starts=starts), payload, set())
+        return request, f"Day {op.day} now starts at {op.at}."
 
     if op.operation == "set_pace":
         if not op.pace:
@@ -367,3 +381,10 @@ def _apply_one(dataset: Dataset, request: PlanRequest, payload: dict,
     at = f" at {op.at}" if op.at else ""
     return (replace(request, custom_activities=list(request.custom_activities) + [activity]),
             f"'{op.name}' added to day {op.day}{at}.")
+
+
+def _displaced(before: dict, after: dict) -> list[str]:
+    """Sights that were in the plan and are not any more, by name."""
+    gone = _scheduled(before) - _scheduled(after)
+    return sorted(sight["sight"] for day in before.get("days", []) for sight in day["sights"]
+                  if normalize_key(sight["sight"]) in gone)

@@ -34,7 +34,7 @@ from .config import (
     SIGHT_BUFFER_HOURS,
     TRANSFER_OVERHEAD_HOURS,
 )
-from .geo import RouteLeg, local_travel_hours, order_by_route, road_km
+from .geo import RouteLeg, local_travel_hours, order_by_route, road_km, route_order
 
 
 def pace_hours(pace: str) -> float:
@@ -69,6 +69,10 @@ class DaySlot:
     available_override: float | None = None
     #: Hours the user chose to add to this day on top of the pace allowance.
     extra_hours: float = 0.0
+    #: Hours this day already owes to the traveller's own plans. A twelve-hour activity
+    #: leaves no room for sightseeing, and the packer has to know that before it fills
+    #: the day -- otherwise the clock ends up running to four in the morning.
+    committed_hours: float = 0.0
 
     @property
     def is_travel_day(self) -> bool:
@@ -119,7 +123,7 @@ class DaySlot:
         sightseeing hours at all -- the engine will not quietly schedule sights into it.
         """
         if self.available_override is not None:
-            return max(0.0, round(self.available_override + self.extra_hours, 2))
+            return max(0.0, round(self.available_override + self.extra_hours - self.committed_hours, 2))
         if self.is_travel_day:
             return 0.0
         costs = self.cost_breakdown(pace)
@@ -128,7 +132,7 @@ class DaySlot:
             hours -= MIN_DEPARTURE_BUFFER_HOURS
         # The traveller can choose a longer day than the pace suggests; the clock still has
         # to fit it before LATEST_END_HOUR, so this buys sights, not miracles.
-        return max(0.0, round(hours + self.extra_hours, 2))
+        return max(0.0, round(hours + self.extra_hours - self.committed_hours, 2))
 
     def max_sights(self, pace: str) -> int:
         """Stop count cap: shortened days get fewer stops, lengthened ones get more.
@@ -213,47 +217,65 @@ def _ordered(candidate: pd.DataFrame, slot: DaySlot) -> pd.DataFrame:
     Sorting geographically and then by time undoes the routing (a sunset point can be
     dragged back across town), so the time groups come first and each group is routed from
     where the previous one ended.
+
+    The ordering itself is worked out on plain tuples and the frame is sliced once at the
+    end. It used to build a new DataFrame per time group, per swap and per concat, which
+    for a five-stop day meant dozens of frame constructions -- on a path the packer calls
+    hundreds of times a plan.
     """
-    frame = candidate.reset_index(drop=True).copy()
-    frame["_time_rank"] = frame["best_time"].map(lambda t: BEST_TIME_ORDER.get(str(t).lower(), 1))
-    ordered_parts: list[pd.DataFrame] = []
-    cursor_lat, cursor_lon = slot.centre_lat, slot.centre_lon
-    for rank in sorted(frame["_time_rank"].unique()):
-        group = frame[frame["_time_rank"] == rank].reset_index(drop=True)
-        order = order_by_route(group, cursor_lat, cursor_lon)
-        routed = group.iloc[order].reset_index(drop=True)
-        routed = _apply_learned_order(routed, slot)
-        ordered_parts.append(routed)
-        cursor_lat, cursor_lon = float(routed.iloc[-1]["lat"]), float(routed.iloc[-1]["lon"])
-    return pd.concat(ordered_parts, ignore_index=True).drop(columns="_time_rank")
+    if len(candidate) < 2:
+        return candidate.reset_index(drop=True)
+    frame = candidate.reset_index(drop=True)
+    rows = tuple(
+        (str(key), float(lat), float(lon), BEST_TIME_ORDER.get(str(best).lower(), 1))
+        for key, lat, lon, best in zip(frame["sight_key"], frame["lat"], frame["lon"],
+                                       frame["best_time"])
+    )
+    positions = _order_positions(rows, slot.centre_lat, slot.centre_lon, slot.order_patterns)
+    return frame.iloc[list(positions)].reset_index(drop=True)
 
 
-def _apply_learned_order(group: pd.DataFrame, slot: DaySlot) -> pd.DataFrame:
+def _order_positions(rows: tuple[tuple[str, float, float, int], ...],
+                     centre_lat: float, centre_lon: float, patterns) -> tuple[int, ...]:
+    """Where each stop goes, as positions into ``rows``. No pandas, no copies."""
+    order: list[int] = []
+    cursor_lat, cursor_lon = centre_lat, centre_lon
+    for rank in sorted({row[3] for row in rows}):
+        members = [index for index, row in enumerate(rows) if row[3] == rank]
+        points = tuple((rows[index][1], rows[index][2]) for index in members)
+        routed = [members[position] for position in route_order(points, cursor_lat, cursor_lon)]
+        routed = _learned_order(routed, rows, centre_lat, centre_lon, patterns)
+        order += routed
+        cursor_lat, cursor_lon = rows[routed[-1]][1], rows[routed[-1]][2]
+    return tuple(order)
+
+
+def _learned_order(group: list[int], rows: tuple[tuple[str, float, float, int], ...],
+                   centre_lat: float, centre_lon: float, patterns) -> list[int]:
     """Swap neighbouring stops to match past itineraries, when the driving does not suffer.
 
     Geography and time of day decide the shape of the day; this only settles ties inside a
     single time slot, and a swap is kept only when it costs no extra driving.
     """
-    patterns = slot.order_patterns
     if patterns is None or len(group) < 2:
         return group
 
-    def driving_km(frame: pd.DataFrame) -> float:
-        lats, lons = frame["lat"].tolist(), frame["lon"].tolist()
-        legs = [road_km(lats[i], lons[i], lats[i + 1], lons[i + 1]) for i in range(len(frame) - 1)]
-        return road_km(slot.centre_lat, slot.centre_lon, lats[0], lons[0]) + sum(legs)
+    def driving_km(positions: list[int]) -> float:
+        points = [(rows[index][1], rows[index][2]) for index in positions]
+        legs = sum(road_km(points[i][0], points[i][1], points[i + 1][0], points[i + 1][1])
+                   for i in range(len(points) - 1))
+        return road_km(centre_lat, centre_lon, points[0][0], points[0][1]) + legs
 
-    ordered = group
+    ordered = list(group)
     for index in range(len(ordered) - 1):
-        first, second = ordered.iloc[index], ordered.iloc[index + 1]
-        if not patterns.prefers(second["sight_key"], first["sight_key"]):
+        first, second = rows[ordered[index]][0], rows[ordered[index + 1]][0]
+        if not patterns.prefers(second, first):
             continue
-        positions = list(range(len(ordered)))
-        positions[index], positions[index + 1] = positions[index + 1], positions[index]
-        candidate = ordered.iloc[positions].reset_index(drop=True)
+        candidate = list(ordered)
+        candidate[index], candidate[index + 1] = candidate[index + 1], candidate[index]
         if driving_km(candidate) <= driving_km(ordered) + 1e-9:
             ordered = candidate
-    return ordered.reset_index(drop=True)
+    return ordered
 
 
 def evaluate_day(sights: pd.DataFrame, slot: DaySlot, pace: str) -> dict:
@@ -344,19 +366,24 @@ def hard_slot_blocker(sights: pd.DataFrame, slot: DaySlot) -> str | None:
     """
     if sights.empty or "best_time" not in sights:
         return None
-    hard = sights[sights["best_time"].astype(str).str.strip().str.lower().isin(HARD_TIME_SLOTS)]
-    if hard.empty:
+    # Plain iteration: `.astype(str).str.lower().isin(...)` is three passes over a new
+    # column, and this runs for every candidate the packer tries.
+    hard_rows = [(str(name), str(best).strip().lower(), float(hours))
+                 for name, best, hours in zip(sights["sight"], sights["best_time"],
+                                              sights["duration_hours"])
+                 if str(best).strip().lower() in HARD_TIME_SLOTS]
+    if not hard_rows:
         return None
-    slots = {str(value).strip().lower() for value in hard["best_time"]}
+    slots = {row[1] for row in hard_rows}
     window_start = max(TIME_WINDOWS[name][0] for name in slots)
     window_end = min(TIME_WINDOWS[name][1] for name in slots)
     # The onward journey still has to happen, so a departure day's evening is already spoken for.
     latest = LATEST_END_HOUR - (slot.departure_cost_hours if slot.is_departure else 0.0)
     end = min(window_end, latest)
-    needed = float(hard["duration_hours"].sum()) + SIGHT_BUFFER_HOURS * len(hard)
+    needed = sum(row[2] for row in hard_rows) + SIGHT_BUFFER_HOURS * len(hard_rows)
     if window_start + needed <= end + 1e-9:
         return None
-    names = ", ".join(f"'{name}'" for name in hard["sight"])
+    names = ", ".join(f"'{row[0]}'" for row in hard_rows)
     if end <= window_start:
         return (f"{names} must be seen after {_clock(window_start)}, which this day owes to the "
                 f"onward journey")
@@ -381,11 +408,15 @@ def pack_day(candidates: pd.DataFrame, slot: DaySlot, pace: str) -> PackedDay:
     if candidates.empty or budget <= 0:
         return packed
 
-    selected = candidates.iloc[0:0]
-    for _, row in sort_by_priority(candidates).iterrows():
-        if len(selected) >= stop_cap:
+    # Candidates are tried in priority order, each kept only if the day still fits. The
+    # chosen set is carried as positions into `ranked` and sliced once per trial;
+    # concatenating a one-row frame per candidate was most of the planner's runtime.
+    ranked = sort_by_priority(candidates).reset_index(drop=True)
+    chosen: list[int] = []
+    for position in range(len(ranked)):
+        if len(chosen) >= stop_cap:
             break
-        trial = _ordered(pd.concat([selected, row.to_frame().T], ignore_index=True), slot)
+        trial = _ordered(ranked.iloc[chosen + [position]], slot)
         travel_hours, route_km_total, max_leg = _day_metrics(trial, slot)
         visit_hours = float(trial["duration_hours"].sum())
         buffer_hours = SIGHT_BUFFER_HOURS * len(trial)
@@ -395,7 +426,7 @@ def pack_day(candidates: pd.DataFrame, slot: DaySlot, pace: str) -> PackedDay:
             continue  # the arrival day stays in town
         if slot.is_departure and excursions:
             continue  # you cannot spend the last morning an hour out of town
-        if hard_slot_blocker(trial, slot) and not _is_pinned(row):
+        if hard_slot_blocker(trial, slot) and not _is_pinned(ranked.iloc[position]):
             continue  # an evening sight belongs on a day that can give it the evening
         if visit_hours + buffer_hours + travel_hours > budget:
             continue
@@ -404,14 +435,16 @@ def pack_day(candidates: pd.DataFrame, slot: DaySlot, pace: str) -> PackedDay:
         if excursions > 1 or (excursions == 1 and len(trial) - 1 > MAX_STOPS_WITH_EXCURSION):
             continue  # a day trip cannot share the day with a full city programme
 
-        selected = trial
+        chosen.append(position)
         packed.sightseeing_hours = round(visit_hours, 2)
         packed.buffer_hours = round(buffer_hours, 2)
         packed.local_travel_hours = round(travel_hours, 2)
         packed.route_km = round(route_km_total, 1)
         packed.max_leg_km = round(max_leg, 1)
 
-    packed.sights = [_sight_payload(row) for _, row in selected.iterrows()]
+    if chosen:
+        packed.sights = [_sight_payload(row)
+                         for _, row in _ordered(ranked.iloc[chosen], slot).iterrows()]
     return packed
 
 
@@ -582,11 +615,17 @@ def plan_city(
     return packed_days
 
 
-def _frame_for(universe: pd.DataFrame, names: list[str]) -> pd.DataFrame:
+def _name_index(universe: pd.DataFrame) -> dict[str, int]:
+    """sight name -> row label, built once per frame rather than per lookup."""
+    return {str(name): label for label, name in zip(universe.index, universe["sight"])}
+
+
+def _frame_for(universe: pd.DataFrame, names: list[str],
+               by_name: dict[str, int] | None = None) -> pd.DataFrame:
     """The planner's rows for these sight names, in this order."""
     if not names:
         return universe.iloc[0:0]
-    by_name = {str(row["sight"]): index for index, row in universe.iterrows()}
+    by_name = _name_index(universe) if by_name is None else by_name
     wanted = [by_name[name] for name in names if name in by_name]
     return universe.loc[wanted]
 
@@ -629,6 +668,7 @@ def refine_grouping(packed_days: list[PackedDay], universe: pd.DataFrame, pace: 
         pinned = {str(row["sight"]) for _, row in universe.iterrows() if not pd.isna(row.get("_forced_day"))}
 
     memo: dict = {}
+    by_name = _name_index(universe)
     coords = {str(row["sight"]): (float(row["lat"]), float(row["lon"]))
               for _, row in universe.iterrows() if not pd.isna(row.get("lat"))}
 
@@ -661,8 +701,8 @@ def refine_grouping(packed_days: list[PackedDay], universe: pd.DataFrame, pace: 
                 continue
             here = [sight["sight"] for sight in first.sights]
             there = [sight["sight"] for sight in second.sights]
-            base = _day_cost(_frame_for(universe, here), first.slot, pace, memo)
-            other = _day_cost(_frame_for(universe, there), second.slot, pace, memo)
+            base = _day_cost(_frame_for(universe, here, by_name), first.slot, pace, memo)
+            other = _day_cost(_frame_for(universe, there, by_name), second.slot, pace, memo)
             if base is None or other is None:
                 continue
             best = (base + other, None)
@@ -674,7 +714,7 @@ def refine_grouping(packed_days: list[PackedDay], universe: pd.DataFrame, pace: 
                 if not nearer_to(name, their_centre, my_centre):
                     continue
                 left, right = [x for x in here if x != name], there + [name]
-                cost = _pair_cost(universe, left, right, first, second, pace, memo)
+                cost = _pair_cost(universe, left, right, first, second, pace, memo, by_name)
                 if cost is not None and cost < best[0] - 1e-6:
                     best = (cost, (left, right))
             for name in there:
@@ -683,7 +723,7 @@ def refine_grouping(packed_days: list[PackedDay], universe: pd.DataFrame, pace: 
                 if not nearer_to(name, my_centre, their_centre):
                     continue
                 left, right = here + [name], [x for x in there if x != name]
-                cost = _pair_cost(universe, left, right, first, second, pace, memo)
+                cost = _pair_cost(universe, left, right, first, second, pace, memo, by_name)
                 if cost is not None and cost < best[0] - 1e-6:
                     best = (cost, (left, right))
             for mine in here:
@@ -697,14 +737,14 @@ def refine_grouping(packed_days: list[PackedDay], universe: pd.DataFrame, pace: 
                         continue
                     left = [x for x in here if x != mine] + [yours]
                     right = [x for x in there if x != yours] + [mine]
-                    cost = _pair_cost(universe, left, right, first, second, pace, memo)
+                    cost = _pair_cost(universe, left, right, first, second, pace, memo, by_name)
                     if cost is not None and cost < best[0] - 1e-6:
                         best = (cost, (left, right))
 
             if best[1] is not None:
                 left, right = best[1]
-                _rebuild(first, _frame_for(universe, left), pace)
-                _rebuild(second, _frame_for(universe, right), pace)
+                _rebuild(first, _frame_for(universe, left, by_name), pace)
+                _rebuild(second, _frame_for(universe, right, by_name), pace)
                 improved = True
         if not improved:
             break
@@ -724,12 +764,13 @@ def _protected(packed: PackedDay, name: str, universe: pd.DataFrame) -> bool:
 
 
 def _pair_cost(universe: pd.DataFrame, left: list[str], right: list[str],
-               first: PackedDay, second: PackedDay, pace: str, memo: dict) -> float | None:
+               first: PackedDay, second: PackedDay, pace: str, memo: dict,
+               by_name: dict[str, int] | None = None) -> float | None:
     """Combined driving for two days after a proposed change, or None if either breaks."""
-    here = _day_cost(_frame_for(universe, left), first.slot, pace, memo)
+    here = _day_cost(_frame_for(universe, left, by_name), first.slot, pace, memo)
     if here is None:
         return None
-    there = _day_cost(_frame_for(universe, right), second.slot, pace, memo)
+    there = _day_cost(_frame_for(universe, right, by_name), second.slot, pace, memo)
     return None if there is None else here + there
 
 

@@ -47,12 +47,17 @@ SCHEDULE_ASSUMPTIONS = (
 
 
 def clock(hour: float) -> str:
-    """0.5 -> '00:30', 13.25 -> '13:15'."""
+    """0.5 -> '00:30', 13.25 -> '13:15', 26.7 -> '02:42 (+1)'.
+
+    A day can legitimately run past midnight once a traveller adds a long evening of their
+    own, and printing "26:42" for that is simply wrong.
+    """
     hour = max(0.0, hour)
     hours, minutes = int(hour), int(round((hour - int(hour)) * 60))
     if minutes == 60:
         hours, minutes = hours + 1, 0
-    return f"{hours:02d}:{minutes:02d}"
+    next_day, hours = divmod(hours, 24)
+    return f"{hours:02d}:{minutes:02d}" + (f" (+{next_day})" if next_day else "")
 
 
 @dataclass
@@ -237,6 +242,36 @@ def _travel_hours_between(dataset: Dataset, city: str, first: dict | None, secon
     return local_travel_hours(distance, city_row.get("altitude_m"))
 
 
+def _place_activities(schedule: DaySchedule, pending: list[dict], now: float,
+                      until: float | None) -> float:
+    """Lay down the traveller's own activities that are due by ``until``.
+
+    ``until=None`` drains the list -- used once the sightseeing is done. A timed activity
+    waits for its hour if the day reaches it early, and is placed as soon as the day can
+    manage if it is already past. Neither case is an error: these are the traveller's own
+    plans and the engine's job is to fit around them, not to refuse them.
+    """
+    while pending:
+        activity = pending[0]
+        at = _clock_to_hours(activity.get("at"))
+        if until is not None and (at is None or at > until + 1e-9):
+            break
+        pending.pop(0)
+        length = max(0.0, float(activity.get("duration_hours", 1.0) or 1.0))
+        if at is not None and at > now + 1e-9:
+            schedule.blocks.append(Block(now, at, "free", "Free time", f"before {activity['name']}"))
+            now = at
+        elif at is not None and at < now - 1e-9:
+            schedule.notes.append(
+                f"'{activity['name']}' was asked for at {clock(at)}, but the day is busy until "
+                f"{clock(now)}; it starts there instead."
+            )
+        schedule.blocks.append(Block(now, now + length, "custom", activity["name"],
+                                     activity.get("note", "") or "added by you"))
+        now += length
+    return now
+
+
 def _clock_to_hours(text: object) -> float | None:
     """``"16:30"`` -> 16.5, or None when there is no time to read."""
     if not text:
@@ -399,6 +434,13 @@ def _lay_out_day(
         now = chosen_start
     else:
         now = (TRANSFER_START_HOUR if transfer else DAY_START_HOUR) + start_shift
+        # An activity of your own at 06:00 means the day starts at 06:00. The engine's idea
+        # of when a day begins is a default, not a rule the traveller has to live with.
+        earliest = min((hour for hour in (_clock_to_hours(item.get("at"))
+                                          for item in day.get("custom_activities", []) or [])
+                        if hour is not None), default=None)
+        if earliest is not None and earliest < now:
+            now = earliest
 
     # 1. The drive, with any en-route stops taken along it.
     if transfer:
@@ -455,10 +497,23 @@ def _lay_out_day(
         schedule.notes.append(f"The day starts at {clock(now)}, after lunch.")
     break_taken = False
 
+    # Timed activities are appointments: the day works around them rather than appending
+    # them at the end, so a 13:00 lunch of your own lands at 13:00 and not after the last
+    # fort. Untimed ones fall wherever the day has room, which is after the sightseeing.
+    pending_activities = sorted(
+        (dict(item) for item in (day.get("custom_activities", []) or [])),
+        key=lambda item: (_clock_to_hours(item.get("at")) is None,
+                          _clock_to_hours(item.get("at")) or 0.0),
+    )
+
     queue = list(city_sights)
     while queue:
         sight = queue.pop(0)
         travel = _travel_hours_between(dataset, city, previous, sight) + SIGHT_BUFFER_HOURS
+        # Anything booked for a time this stop would run through goes first -- otherwise a
+        # 13:00 lunch of your own waits for a fort that finishes at 14:42.
+        now = _place_activities(schedule, pending_activities, now,
+                                until=now + travel + float(sight["duration_hours"]))
         label = "Drive to" if previous else "Set off for"
         window, from_opening_hours = effective_window(dataset, city, sight)
         if window is None:
@@ -581,21 +636,8 @@ def _lay_out_day(
         now += visit
         previous = sight
 
-    # 3. Whatever the user added themselves: no coordinates, so no travel -- just time.
-    for activity in day.get("custom_activities", []) or []:
-        at = _clock_to_hours(activity.get("at"))
-        length = float(activity.get("duration_hours", 1.0) or 1.0)
-        if at is not None and at > now:
-            schedule.blocks.append(Block(now, at, "free", "Free time", f"before {activity['name']}"))
-            now = at
-        elif at is not None and at < now - 1e-9:
-            schedule.notes.append(
-                f"'{activity['name']}' was asked for at {clock(at)} but the day only frees up at "
-                f"{clock(now)}; it is placed there instead."
-            )
-        schedule.blocks.append(Block(now, now + length, "custom", activity["name"],
-                                     activity.get("note", "") or "added by you"))
-        now += length
+    # 3. Anything of the traveller's own that is still waiting its turn.
+    now = _place_activities(schedule, pending_activities, now, until=None)
 
     # 4. Lunch still owed on a day that never reached a stop after noon.
     if city_sights and not lunch_taken and now <= LUNCH_WINDOW[1]:
@@ -626,9 +668,16 @@ def _lay_out_day(
         )
 
     if schedule.blocks and schedule.blocks[-1].end > LATEST_END_HOUR + 1e-6:
-        schedule.flags.append(
-            f"The day runs to {clock(schedule.blocks[-1].end)}, past the {clock(LATEST_END_HOUR)} limit."
-        )
+        # Running late because of your own evening is a choice, not a planning error.
+        if any(block.kind == "custom" for block in schedule.blocks):
+            schedule.notes.append(
+                f"The day runs to {clock(schedule.blocks[-1].end)} because of what you added."
+            )
+        else:
+            schedule.flags.append(
+                f"The day runs to {clock(schedule.blocks[-1].end)}, past the "
+                f"{clock(LATEST_END_HOUR)} limit."
+            )
     return schedule
 
 

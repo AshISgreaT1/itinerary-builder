@@ -6,57 +6,93 @@
 <title>Itinerary Planner</title>
 <style>
   :root {
-    --bg: #f6f7fb; --panel: #ffffff; --ink: #16181d; --muted: #6b7280; --line: #e5e7eb;
-    --brand: #1f6feb; --brand-ink: #0b3d91; --accent: #0ea5a4;
-    --ok: #15803d; --ok-bg: #e7f6ec; --warn: #a15c00; --warn-bg: #fdf3e2; --bad: #b42318; --bad-bg: #fdecea;
-    --sight: #1f6feb; --buffer: #9ca3af; --travel: #f59e0b; --free: #e5e7eb;
-    --radius: 14px; --shadow: 0 1px 2px rgba(16,24,40,.06), 0 8px 24px rgba(16,24,40,.06);
+    --bg: #f7f8fa; --panel: #ffffff; --ink: #11161d; --muted: #667085; --line: #e6e9ee;
+    --line-soft: #f0f2f5;
+    --brand: #1a5fd0; --brand-soft: #eef4ff; --brand-ink: #0b3d91; --accent: #0f766e;
+    --ok: #15803d; --ok-bg: #edf8f1; --warn: #92510a; --warn-bg: #fdf4e6; --bad: #b42318; --bad-bg: #fdeeec;
+    --sight: #1a5fd0; --buffer: #b6bcc7; --travel: #d97706; --free: #eceff3;
+    --radius: 12px; --radius-lg: 16px;
+    --shadow: 0 1px 2px rgba(16,24,40,.05);
+    --shadow-lift: 0 1px 2px rgba(16,24,40,.05), 0 12px 28px -12px rgba(16,24,40,.18);
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0f1115; --panel: #161a21; --ink: #e8eaed; --muted: #9aa3b2; --line: #262c36;
-      --brand: #5b9bff; --brand-ink: #cfe0ff; --ok: #6ee7a8; --ok-bg: #0f2b1d; --warn: #fbbf24;
-      --warn-bg: #2a2110; --bad: #fca5a5; --bad-bg: #2b1414; --free: #262c36; --buffer: #4b5563;
-      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+      --bg: #0e1116; --panel: #151a21; --ink: #e7eaee; --muted: #98a2b3; --line: #242b35;
+      --line-soft: #1c222b;
+      --brand: #6ba3ff; --brand-soft: #16233a; --brand-ink: #cfe0ff; --ok: #6ee7a8; --ok-bg: #11291e;
+      --warn: #fbbf24; --warn-bg: #281f10; --bad: #fca5a5; --bad-bg: #2a1515;
+      --free: #242b35; --buffer: #4b5563; --travel: #f0a24a;
+      --shadow: 0 1px 2px rgba(0,0,0,.45);
+      --shadow-lift: 0 1px 2px rgba(0,0,0,.45), 0 12px 28px -12px rgba(0,0,0,.6);
     }
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.55 -apple-system, BlinkMacSystemFont,
-    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.6 ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
   }
-  .wrap { max-width: 1060px; margin: 0 auto; padding: 24px 16px 64px; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px 72px; }
+  /* A slim masthead rather than a tall gradient: the trip is the subject of this page,
+     not the product name. */
   header.hero {
-    background: linear-gradient(135deg, var(--brand) 0%, var(--accent) 100%);
-    color: #fff; border-radius: 20px; padding: 26px 26px 22px; box-shadow: var(--shadow);
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding: 22px 0 18px; margin-bottom: 20px; border-bottom: 1px solid var(--line);
+    background: none; color: inherit; border-radius: 0; box-shadow: none;
   }
-  header.hero h1 { margin: 0 0 4px; font-size: 25px; letter-spacing: -.02em; }
-  header.hero p { margin: 0; opacity: .92; font-size: 14px; }
+  header.hero h1 { margin: 0; font-size: 19px; font-weight: 650; letter-spacing: -.015em; }
+  header.hero h1::before {
+    content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 9px;
+    border-radius: 3px; background: var(--brand); vertical-align: middle;
+  }
+  header.hero p { margin: 0; color: var(--muted); font-size: 13.5px; }
 
-  form.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
-    box-shadow: var(--shadow); padding: 18px; margin-top: -18px; position: relative; z-index: 2;
-    margin-left: 10px; margin-right: 10px; }
+  form.card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg);
+    box-shadow: var(--shadow); padding: 20px; margin: 0; position: relative; z-index: 2; }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
-  label { display: block; font-size: 12px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: .04em; color: var(--muted); margin-bottom: 5px; }
-  input, select { width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px;
-    background: var(--bg); color: var(--ink); font: inherit; }
-  input:focus, select:focus { outline: 2px solid var(--brand); outline-offset: 1px; }
-  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  .chip { border: 1px solid var(--line); background: var(--bg); color: var(--ink); border-radius: 999px;
-    padding: 5px 11px; font-size: 13px; cursor: pointer; }
+  label { display: block; font-size: 11.5px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .05em; color: var(--muted); margin-bottom: 6px; }
+  input, select { width: 100%; height: 40px; padding: 0 11px; border: 1px solid var(--line);
+    border-radius: 9px; background: var(--panel); color: var(--ink); font: inherit;
+    transition: border-color .12s ease, box-shadow .12s ease; }
+  select { padding-right: 6px; }
+  input:hover, select:hover { border-color: #cfd5de; }
+  input:focus, select:focus { outline: none; border-color: var(--brand);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 18%, transparent); }
+  /* One visible focus style for everything reachable by keyboard. */
+  :focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 8px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .chip { border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+    border-radius: 999px; padding: 5px 12px; font-size: 12.5px; cursor: pointer;
+    transition: background .12s ease, border-color .12s ease, color .12s ease; }
+  .chip:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); }
   .chip[aria-pressed="true"] { background: var(--brand); border-color: var(--brand); color: #fff; }
-  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
-  button.primary { background: var(--brand); color: #fff; border: 0; border-radius: 10px; padding: 11px 20px;
-    font-weight: 650; font-size: 15px; cursor: pointer; }
-  button.primary:disabled { opacity: .6; cursor: progress; }
-  button.ghost { background: transparent; border: 1px solid var(--line); color: var(--ink);
-    border-radius: 10px; padding: 10px 14px; cursor: pointer; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 16px; }
+  button.primary { background: var(--brand); color: #fff; border: 0; border-radius: 9px;
+    height: 40px; padding: 0 20px; font: inherit; font-weight: 600; cursor: pointer;
+    transition: background .12s ease, transform .06s ease; }
+  button.primary:hover { background: #164fae; }
+  button.primary:active { transform: translateY(1px); }
+  button.primary:disabled { opacity: .55; cursor: progress; }
+  button.ghost { background: var(--panel); border: 1px solid var(--line); color: var(--ink);
+    border-radius: 9px; height: 40px; padding: 0 16px; font: inherit; cursor: pointer;
+    transition: border-color .12s ease, background .12s ease; }
+  button.ghost:hover { border-color: #cfd5de; background: var(--line-soft); }
+  .mini { border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+    border-radius: 8px; padding: 5px 11px; font: inherit; font-size: 12.5px; cursor: pointer;
+    transition: border-color .12s ease, background .12s ease, color .12s ease; }
+  .mini:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); }
+  .mini:disabled { opacity: .45; cursor: default; }
+  .mini:disabled:hover { border-color: var(--line); color: var(--ink); background: var(--panel); }
 
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; margin-top: 18px; }
-  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 13px 15px; }
-  .stat b { display: block; font-size: 21px; letter-spacing: -.02em; }
-  .stat span { font-size: 12px; color: var(--muted); }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px;
+    margin: 4px 0 18px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 14px 16px; }
+  .stat b { display: block; font-size: 22px; font-weight: 650; letter-spacing: -.02em;
+    font-variant-numeric: tabular-nums; }
+  .stat span { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 
   .banner { margin-top: 18px; border-radius: var(--radius); padding: 14px 16px; border: 1px solid transparent; }
   .banner h3 { margin: 0 0 6px; font-size: 15px; }
@@ -75,10 +111,14 @@
   .leg b { font-weight: 650; }
 
   .day { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
-    box-shadow: var(--shadow); margin-top: 16px; overflow: hidden; }
+    box-shadow: var(--shadow); margin-top: 14px; overflow: hidden; position: relative; }
+  /* A rail rather than a heavier border: it marks where a day starts at a glance. */
+  .day::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--brand); opacity: .85; }
+  .day.tips::before, .day.missed::before { background: var(--muted); }
   .day > header { display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
-    padding: 14px 18px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
-  .day h2 { margin: 0; font-size: 17px; letter-spacing: -.01em; }
+    padding: 15px 18px 13px; border-bottom: 1px solid var(--line-soft); flex-wrap: wrap; }
+  .day h2 { margin: 0; font-size: 16.5px; font-weight: 650; letter-spacing: -.01em; }
   .day .where { color: var(--muted); font-size: 13px; }
   .bar { display: flex; height: 8px; border-radius: 99px; overflow: hidden; background: var(--free); margin: 0 18px; }
   .bar i { display: block; height: 100%; }
@@ -108,10 +148,43 @@
   .tip-conflict { background: rgba(37, 99, 235, 0.06); border-color: rgba(37, 99, 235, 0.25); }
   .tip-capacity, .tip-balance { background: rgba(16, 185, 129, 0.06); border-color: rgba(16, 185, 129, 0.25); }
   .day-controls { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 18px 10px; }
+  form.card.tucked { display: none; }
+  .trip-bar { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px;
+              flex-wrap: wrap; margin: 22px 0 14px; }
+  .trip-bar h2 { margin: 0 0 2px; font-size: 26px; font-weight: 680; letter-spacing: -.025em; }
+  .trip-bar .where { color: var(--muted); font-size: 13px; }
+  .trip-bar-actions { display: flex; gap: 8px; }
+  .mini.primary { background: var(--brand); color: #fff; border-color: var(--brand); }
+  .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin: 18px 0 20px;
+          flex-wrap: wrap; position: sticky; top: 0; z-index: 5; background: var(--bg);
+          padding-top: 4px; }
+  .tab { appearance: none; background: none; border: none; border-bottom: 2px solid transparent;
+         padding: 10px 15px; font: inherit; font-size: 14px; color: var(--muted); cursor: pointer;
+         margin-bottom: -1px; border-radius: 8px 8px 0 0;
+         transition: color .12s ease, background .12s ease; }
+  .tab:hover { color: var(--ink); background: var(--line-soft); }
+  .tab.on { color: var(--brand); border-bottom-color: var(--brand); font-weight: 600;
+            background: none; }
+  .tab-count { display: inline-block; min-width: 19px; padding: 0 6px; margin-left: 7px;
+               border-radius: 9px; background: var(--brand-soft); color: var(--brand);
+               font-size: 11px; font-weight: 600; line-height: 19px; text-align: center; }
+  .tab.on .tab-count { background: var(--brand); color: #fff; }
+  .panel { display: none; }
+  .panel.on { display: block; }
+  .panel-hint { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+  .view-day .v-row { display: grid; grid-template-columns: 112px 1fr; gap: 14px;
+                     padding: 11px 18px; border-top: 1px solid var(--line-soft); }
+  .view-day .v-row:first-of-type { border-top: none; }
+  .view-day .v-row:hover { background: var(--line-soft); }
+  .v-time { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums;
+            white-space: nowrap; padding-top: 1px; }
+  .v-what b { font-size: 14.5px; font-weight: 600; }
+  .v-note { color: var(--muted); font-size: 13px; margin-top: 3px; line-height: 1.5;
+            max-width: 72ch; }
   .trip-panel .alloc { margin: 0 18px 14px; }
   .alloc-head { display: flex; justify-content: space-between; font-size: 12px; letter-spacing: .04em;
                 text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
-  .alloc-row { display: grid; grid-template-columns: 1fr auto auto auto 90px; gap: 8px;
+  .alloc-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px;
                align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
   .alloc-city { font-weight: 600; }
   .alloc-n { min-width: 22px; text-align: center; font-variant-numeric: tabular-nums; }
@@ -164,9 +237,7 @@
   .missed li { margin-bottom: 6px; font-size: 13.5px; }
   .err { color: var(--bad); margin-top: 16px; }
   .sight-actions { margin-left: auto; display: flex; gap: 6px; align-items: flex-start; }
-  .mini { font-size: 12px; padding: 4px 9px; border-radius: 8px; border: 1px solid var(--line);
-    background: var(--bg); color: var(--muted); cursor: pointer; }
-  .mini:hover { color: var(--ink); border-color: var(--brand); }
+
   .add-panel { margin-top: 18px; background: var(--panel); border: 1px solid var(--line);
     border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px 18px; }
   .add-panel h3 { margin: 0 0 4px; font-size: 16px; }
@@ -354,6 +425,7 @@ $("form").addEventListener("submit", async (event) => {
     } else {
       // /generate-itinerary does not compute suggestions; ask for them so a fresh plan
       // arrives with the same advice a customised one carries.
+      closeForm();
       payload.suggestions = await fetch("/itinerary/suggestions", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ base: body }),
@@ -388,7 +460,49 @@ function validationBanner(validation) {
   return head + list + extra + `</div>`;
 }
 
-function dayCard(day) {
+// The plan as a customer reads it: when, what, and a line about why it is worth seeing.
+function dayView(day) {
+  const schedule = day.schedule || {};
+  const blocks = (schedule.blocks || []).filter((b) =>
+    ["sight", "transfer", "custom", "lunch", "check-in", "checkout"].includes(b.kind));
+  const stops = day.sights.filter((s) => !s.en_route).length;
+
+  const where = day.transfer
+    ? `${esc(day.transfer.from_city)} → ${esc(day.transfer.to_city)}${
+        day.transfer.drive_hours !== null
+          ? ` · ${hours(day.transfer.drive_hours)} by ${esc(day.transfer.mode)}`
+          : " · journey time missing"}`
+    : (day.is_arrival_day ? "Arrival day" : day.is_departure_day ? "Departure day" : "");
+
+  const rows = blocks.map((block) => {
+    const sight = day.sights.find((s) => s.sight === block.sight);
+    const note = block.kind === "sight" ? (sight?.description || "") : (block.detail || "");
+    return `<div class="v-row">
+        <div class="v-time">${esc(block.start)}–${esc(block.end)}</div>
+        <div class="v-what">
+          <b>${esc(block.kind === "sight" ? block.sight : block.label)}</b>
+          ${sight?.must_visit ? '<span class="tag must">★ must visit</span>' : ""}
+          ${sight?.is_excursion ? `<span class="tag trip">day trip · ${sight.distance_from_centre_km} km</span>` : ""}
+          ${note ? `<div class="v-note">${esc(note)}</div>` : ""}
+        </div>
+      </div>`;
+  }).join("");
+
+  return `<section class="day view-day">
+      <header>
+        <div><h2>Day ${day.day} · ${esc(day.city)}</h2>${
+          where ? `<div class="where">${where}</div>` : ""}</div>
+        <div class="where">${schedule.starts ? `${esc(schedule.starts)}–${esc(schedule.ends)}` : ""}${
+          stops ? ` · ${stops} stop${stops === 1 ? "" : "s"}` : ""}</div>
+      </header>
+      ${rows || `<p class="empty">${esc((day.notes || [])[0] || "A free day.")}</p>`}
+    </section>`;
+}
+
+// A day is drawn twice: once as the customer will read it, once with everything an agent
+// can change. Keeping both in one function means the two views cannot drift apart.
+function dayCard(day, mode) {
+  if (mode !== "edit") return dayView(day);
   const budget = day.time_budget || {};
   const schedule = day.schedule || {};
   const totals = schedule.totals || {};
@@ -439,9 +553,10 @@ function dayCard(day) {
         </li>`).join("")}</ol>`
     : `<p class="empty">No sightseeing on this day — ${esc((day.notes || [])[0] || "the day is taken by travel.")}</p>`;
 
+  // The heading already names the city; repeating it below says nothing twice.
   const where = day.transfer
     ? `${esc(day.transfer.from_city)} → ${esc(day.transfer.to_city)}${day.transfer.drive_hours !== null ? ` · ${hours(day.transfer.drive_hours)} by ${esc(day.transfer.mode)}` : " · journey time missing"}`
-    : esc(day.city);
+    : (day.is_arrival_day ? "Arrival day" : day.is_departure_day ? "Departure day" : "");
 
   const timeline = (schedule.blocks || []).length
     ? `<details class="timeline" open>
@@ -471,7 +586,8 @@ function dayCard(day) {
 
   return `<section class="day" data-day="${day.day}" data-city="${esc(day.city)}">
       <header>
-        <div><h2>Day ${day.day} · ${esc(day.city)}</h2><div class="where">${where}</div></div>
+        <div><h2>Day ${day.day} · ${esc(day.city)}</h2>${
+          where ? `<div class="where">${where}</div>` : ""}</div>
         <div class="where">${hours(day.used_hours)} of ${hours(day.available_hours)} used${
           schedule.span_hours ? ` · on the go ${esc(schedule.starts)}–${esc(schedule.ends)} (${hours(schedule.span_hours)})` : ""}</div>
       </header>
@@ -538,13 +654,76 @@ function render(plan) {
 
   lastPlan = plan;
   renderPrint(plan);
+
+  const issues = tips.length + slotted.length
+    + Object.keys(plan.unscheduled_reasons || {}).length;
+  const tabs = [
+    { id: "itinerary", label: "Itinerary" },
+    { id: "customise", label: "Customise" },
+    { id: "issues", label: "Suggestions", count: issues },
+    { id: "add", label: "Add sights" },
+  ];
+
   $("out").innerHTML = `
-    <h2 style="margin:22px 0 0;letter-spacing:-.02em">${esc(plan.request.cities.join(" + "))}</h2>
-    <div class="where" style="color:var(--muted);font-size:13px">${esc(plan.request.pace)} pace · ${nights}${
-      summary.departure_day_reserved_for ? ` · departure: ${esc(summary.departure_day_reserved_for)}` : ""}</div>
-    ${stats}${validationBanner(plan.validation)}${route}
-    ${trip}${tipPanel}${plan.days.map(dayCard).join("")}${operationLog(plan)}${changeLog(plan)}${slotNote}${addPanel(plan)}${missed}${closed}`;
+    <div class="trip-bar">
+      <div>
+        <h2>${esc(plan.request.cities.join(" + "))}</h2>
+        <div class="where">${summary.days} days · ${nights} · ${esc(plan.request.pace)} pace${
+          summary.departure_day_reserved_for ? ` · departure: ${esc(summary.departure_day_reserved_for)}` : ""}</div>
+      </div>
+      <div class="trip-bar-actions">
+        <button class="mini" id="change-trip">Change trip</button>
+        <button class="mini primary" id="print-2">Print for customer</button>
+      </div>
+    </div>
+    ${validationBanner(plan.validation)}
+    <nav class="tabs">${tabs.map((tab) => `
+      <button class="tab" data-tab="${tab.id}">${esc(tab.label)}${
+        tab.count ? `<span class="tab-count">${tab.count}</span>` : ""}</button>`).join("")}</nav>
+
+    <div class="panel" data-panel="itinerary">
+      ${stats}${route}
+      ${plan.days.map((day) => dayCard(day, "view")).join("")}
+    </div>
+
+    <div class="panel" data-panel="customise">
+      ${trip}
+      <p class="panel-hint">Drag a stop onto another day to move it, or onto another stop to swap.
+        Every change rebuilds the whole plan, so times and travel stay correct.</p>
+      ${plan.days.map((day) => dayCard(day, "edit")).join("")}
+      ${operationLog(plan)}${changeLog(plan)}
+    </div>
+
+    <div class="panel" data-panel="issues">
+      ${tipPanel || '<p class="panel-hint">Nothing to flag — this plan passes every check.</p>'}
+      ${slotNote}${missed}${closed}
+    </div>
+
+    <div class="panel" data-panel="add">${addPanel(plan) ||
+      '<p class="panel-hint">Every sight in these cities is already in the plan.</p>'}</div>`;
+
+  showTab(activeTab);
   window.scrollTo({ top: $("out").offsetTop - 20, behavior: "smooth" });
+}
+
+function closeForm() { document.querySelector("form.card").classList.add("tucked"); }
+
+function openForm() {
+  document.querySelector("form.card").classList.remove("tucked");
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+// Which tab is open survives a rebuild: an agent who edits on the Customise tab should
+// still be looking at it when the new plan arrives.
+let activeTab = "itinerary";
+
+function showTab(id) {
+  const panels = [...document.querySelectorAll(".panel")];
+  if (!panels.some((panel) => panel.dataset.panel === id)) id = "itinerary";
+  activeTab = id;
+  panels.forEach((panel) => panel.classList.toggle("on", panel.dataset.panel === id));
+  document.querySelectorAll(".tab").forEach((tab) =>
+    tab.classList.toggle("on", tab.dataset.tab === id));
 }
 
 // --- editing: add, replace or remove sights, then rebuild the whole plan ---------------
@@ -562,7 +741,6 @@ function tripPanel(plan) {
       <b class="alloc-n">${split[city]}</b>
       <button class="mini" data-days="${esc(city)}" data-delta="1"
         ${cities.length < 2 ? "disabled" : ""} title="one day more here">+</button>
-      <span class="alloc-nights">${split[city]} day${split[city] === 1 ? "" : "s"}</span>
     </div>`).join("");
 
   return `<section class="day trip-panel">
@@ -706,6 +884,11 @@ async function offerDays(sight, city, host) {
 }
 
 document.addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-tab]");
+  if (tab) { showTab(tab.dataset.tab); return; }
+  if (event.target.closest("#change-trip")) { openForm(); return; }
+  if (event.target.closest("#print-2")) { $("print").click(); return; }
+
   const tip = event.target.closest("[data-tip]");
   const extend = event.target.closest("[data-extend]");
   const activity = event.target.closest("[data-activity]");

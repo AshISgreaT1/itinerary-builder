@@ -12,7 +12,8 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api_v1 import API_KEYS_ENV, ALLOW_ANONYMOUS_ENV, API_VERSION, _plan_cached
+from app import plancache
+from app.api_v1 import API_KEYS_ENV, ALLOW_ANONYMOUS_ENV, API_VERSION
 from app.main import app
 
 KEY = "test-key-123"
@@ -256,7 +257,7 @@ def test_the_docs_page_and_schema_describe_the_api(client):
 
 # --- caching -------------------------------------------------------------------------------------------------------
 def test_an_identical_request_is_served_from_memory(client):
-    _plan_cached.cache_clear()
+    plancache.clear()
     body = {"destination": "Udaipur", "days": 3, "pace": "relaxed"}
     first = client.post("/api/v1/itinerary", headers=HEADERS, json=body).json()
     second = client.post("/api/v1/itinerary", headers=HEADERS, json=body).json()
@@ -266,7 +267,7 @@ def test_an_identical_request_is_served_from_memory(client):
 
 
 def test_the_cache_keys_on_everything_that_changes_a_plan(client):
-    _plan_cached.cache_clear()
+    plancache.clear()
     base = {"destination": "Udaipur", "days": 3}
     client.post("/api/v1/itinerary", headers=HEADERS, json=base)
     for change in [{"days": 4}, {"pace": "active"}, {"start_month": 1}, {"destination": "Jaipur"}]:

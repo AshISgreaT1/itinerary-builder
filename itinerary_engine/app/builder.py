@@ -23,6 +23,7 @@ from .config import (
 )
 from .data_loader import Dataset, get_dataset
 from .enroute import EnRouteStop, plan_en_route
+from . import plancache
 from .patterns import patterns_for
 from .schedule import SCHEDULE_ASSUMPTIONS, build_day_schedule, clock
 from .geo import (RouteLeg, local_travel_hours, parse_access_distance_km, road_km,
@@ -268,6 +269,25 @@ def allocate_city_days(
     return allocation
 
 
+def _hours_taken_from_sightseeing(request: PlanRequest, day_number: int) -> float:
+    """How much of a day's sightseeing time the traveller's own plans actually use.
+
+    Only the part that overlaps the sightseeing window counts. Dinner at 21:30 costs the
+    day nothing -- the sights have closed -- and reserving two hours for it would push a
+    temple off the morning for no reason. An activity with no time is assumed to want the
+    day, since it has to go somewhere.
+    """
+    taken = 0.0
+    for item in request.activities_for_day(day_number):
+        start = item.start_hour()
+        if start is None:
+            taken += item.duration_hours
+            continue
+        overlap = min(start + item.duration_hours, LATEST_END_HOUR) - max(start, DAY_START_HOUR)
+        taken += max(0.0, overlap)
+    return round(taken, 2)
+
+
 def build_day_slots(dataset: Dataset, request: PlanRequest, city_keys: list[str], allocation: dict[str, int]) -> tuple[list[DaySlot], list[RouteLeg]]:
     """Lay the trip out day by day, charging intercity drives to the day they happen on."""
     slots: list[DaySlot] = []
@@ -301,6 +321,7 @@ def build_day_slots(dataset: Dataset, request: PlanRequest, city_keys: list[str]
                     travel_only=bool(transfer is not None and not transfer.fits_one_day),
                     order_patterns=patterns_for(dataset),
                     extra_hours=float(request.extra_day_hours.get(day_number, 0.0)),
+                    committed_hours=_hours_taken_from_sightseeing(request, day_number),
                 )
             )
             day_number += 1
@@ -341,8 +362,23 @@ def build_itinerary(request: PlanRequest, dataset: Dataset | None = None, repair
 
     ``repair`` lets the builder re-plan once to rescue a sight that cannot reach its
     preferred slot where it landed; the retry itself runs with ``repair=False``.
+
+    Planning is deterministic, so an identical request is answered from
+    :mod:`app.plancache` rather than planned again. That matters most for editing, which
+    replays the same prefix of operations on every change (see the cache's own docstring).
     """
     dataset = dataset or get_dataset()
+    key = plancache.key_for(request, dataset, repair)
+    remembered = plancache.get(key)
+    if remembered is not None:
+        return remembered
+    payload = _plan(request, dataset, repair)
+    plancache.put(key, payload)
+    return payload
+
+
+def _plan(request: PlanRequest, dataset: Dataset, repair: bool) -> dict:
+    """Build a plan from scratch. Everything above this is caching."""
     pace = request.pace.strip().lower()
     pace_hours(pace)  # validates the pace name
 
@@ -761,36 +797,49 @@ def _resolve_hard_slots(request: PlanRequest, dataset: Dataset, payload: dict, p
         pending = _deferred_everywhere(current)
         if not pending:
             break
-        source, entry = pending[0]
-        name = entry["sight"]
+
+        # Try to re-home one sight. Each attempt is a full re-plan, which is the price of
+        # keeping the route and the clock honest, so only days with room are attempted.
         moved = False
-        for target in _evening_candidates(current, source, entry)[:MAX_SLOT_REPAIRS]:
-            trial = _try_plan(request, dataset, pinned=[PinnedSight(name, source.get("city"), target)],
-                              unplaceable=dropped)
-            if trial is None or _is_deferred(trial, name):
-                continue
-            if len(_deferred_everywhere(trial)) >= len(_deferred_everywhere(current)):
-                continue  # it only moved the problem to another day
-            if len(trial.get("unscheduled_must_visits", [])) > len(current.get("unscheduled_must_visits", [])):
-                continue  # re-homing one sight must not push a must-visit out
-            for day in trial["days"]:
-                if day["day"] == target:
-                    day.setdefault("notes", []).append(
-                        f"'{name}' was moved here from day {source['day']} so it falls inside its "
-                        f"{entry.get('best_time', 'preferred')} window."
-                    )
-            current, moved = trial, True
-            break
+        for source, entry in pending:
+            name = entry["sight"]
+            for target in _evening_candidates(current, source, entry)[:MAX_SLOT_REPAIRS]:
+                trial = _try_plan(request, dataset,
+                                  pinned=[PinnedSight(name, source.get("city"), target)],
+                                  unplaceable=dropped)
+                if trial is None or _is_deferred(trial, name):
+                    continue
+                if len(_deferred_everywhere(trial)) >= len(_deferred_everywhere(current)):
+                    continue  # it only moved the problem to another day
+                if len(trial.get("unscheduled_must_visits", [])) > len(current.get("unscheduled_must_visits", [])):
+                    continue  # re-homing one sight must not push a must-visit out
+                for day in trial["days"]:
+                    if day["day"] == target:
+                        day.setdefault("notes", []).append(
+                            f"'{name}' was moved here from day {source['day']} so it falls inside its "
+                            f"{entry.get('best_time', 'preferred')} window."
+                        )
+                current, moved = trial, True
+                break
+            if moved:
+                break
         if moved:
             continue
-        # No day can hold it at the right time: leave it out rather than visit it wrongly.
-        dropped.append(f"{source.get('city')} / {name}")
-        reasons[f"{source.get('city')} / {name}"] = (
-            f"{entry['reason']}, and no other day in {source.get('city')} has a free "
-            f"{entry.get('best_time', 'evening')} slot. Left out rather than scheduled outside "
-            f"{clock(float(entry.get('window_start', 0)))}-{clock(float(entry.get('window_end', 0)))}; "
-            f"add a day, or accept seeing it at the wrong time by pinning it."
-        )
+
+        # Nothing in this round can be re-homed, so every remaining sight leaves the trip --
+        # and they leave together. Dropping them one at a time meant a full re-plan each,
+        # which is what made a hard plan take three seconds instead of one.
+        for source, entry in pending:
+            label = f"{source.get('city')} / {entry['sight']}"
+            if label in dropped:
+                continue
+            dropped.append(label)
+            reasons[label] = (
+                f"{entry['reason']}, and no other day in {source.get('city')} has a free "
+                f"{entry.get('best_time', 'evening')} slot. Left out rather than scheduled outside "
+                f"{clock(float(entry.get('window_start', 0)))}-{clock(float(entry.get('window_end', 0)))}; "
+                f"add a day, or accept seeing it at the wrong time by pinning it."
+            )
         trial = _try_plan(request, dataset, unplaceable=dropped)
         if trial is None:
             break

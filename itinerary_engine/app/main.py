@@ -7,7 +7,11 @@ Docs at:   http://127.0.0.1:8000/docs
 from __future__ import annotations
 
 import logging
+import os
+import threading
+import time
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -30,7 +34,34 @@ from .suggest import suggestions_for
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    """Load the dataset and plan one small trip, in the background, at startup.
+
+    Nothing here changes what the engine does -- it only moves work off the first
+    traveller's request. A cold instance otherwise pays the dataset load and the
+    scikit-learn import (about 2.5s on a laptop, more on a small cloud instance) while
+    somebody waits, which is exactly when it is most noticeable. Failures are logged and
+    ignored: a warm-up that cannot run must never stop the service from starting.
+    """
+    def warm() -> None:
+        try:
+            started = time.monotonic()
+            dataset = get_dataset()
+            city = str(dataset.sights.iloc[0]["city"])
+            build_itinerary(PlanRequest(cities=[city], duration_days=2, pace="moderate"), dataset)
+            logger.info("Warm-up finished in %.1fs (dataset and planner ready).",
+                        time.monotonic() - started)
+        except Exception:  # pragma: no cover - never let warm-up break startup
+            logger.exception("Warm-up failed; the first request will be slower.")
+
+    if os.environ.get("ITINERARY_SKIP_WARMUP", "").strip() not in {"1", "true", "yes"}:
+        threading.Thread(target=warm, name="warm-up", daemon=True).start()
+    yield
+
+
 app = FastAPI(
+    lifespan=_lifespan,
     title="Deterministic Itinerary Engine",
     version="1.0.0",
     description=(

@@ -158,6 +158,41 @@ re-plans around time-of-day conflicts. Because planning is deterministic, identi
 are served from an in-process cache (`meta.cached`) in about a millisecond. The cache keys on
 everything that changes a plan -- cities, days, pace, origin, month.
 
+## Speed
+
+A plan takes **0.15 - 1.8 seconds**, and an identical request comes back from memory in about
+a millisecond. Getting there was a matter of measuring rather than guessing: profiling a
+two-city plan showed the time going to pandas machinery, not to planning. 5,150
+`DataFrame.__getitem__`, 5,838 `_ixs` and 4,513 `Series.__init__` calls on frames of five to
+thirty rows -- while the 3,563 distance calculations that are the actual work cost 30ms.
+
+| Change | Why |
+| --- | --- |
+| The visiting order is worked out on tuples, the frame sliced once | `_ordered` built a new DataFrame per time group, per swap and per concat |
+| `route_order()` caches on coordinates | the same handful of stops is routed again for every candidate, every refinement and every re-plan |
+| The packer carries positions, not frames | `pd.concat` of a one-row frame per candidate was most of `pack_day` |
+| `hard_slot_blocker` iterates instead of `.astype(str).str.lower().isin(...)` | three passes over a new column, per candidate |
+| Unplaceable sights are dropped together | the resolver re-planned once per sight; five full re-plans became two |
+
+**Editing used to get slower the more you edited.** Every customisation rebuilds the plan --
+that is what keeps the route, the clock and the validator in agreement -- and the UI sends
+the whole accumulated list each time, so the sixth edit rebuilt the plan seven times. Edits
+measured 4.1s, 3.4s, 5.5s, 7.3s as the list grew. Planning is deterministic, so
+`app/plancache.py` remembers plans and those repeated prefixes are now free: edits are flat
+at **0.35 - 2.1s**, and what is left is the one build that is genuinely new.
+
+The cache keys on every field of the request plus the dataset file and its modification
+time, and hands out deep copies (about a millisecond) because callers do mutate what they
+are given. `ITINERARY_PLAN_CACHE=0` switches it off. The test suite clears it between tests:
+a cached plan would otherwise let a test patch the planner, rebuild, and quietly prove
+nothing.
+
+**Cold starts.** Importing scikit-learn costs about 2.5s and was paid before the health check
+could answer, even for requests that never cluster anything. It is now imported on first use,
+and a background thread at startup loads the dataset and plans one small trip, so the first
+traveller does not pay for either. `/health` answers in ~30ms while that runs.
+`ITINERARY_SKIP_WARMUP=1` disables it.
+
 ## Deploying on Render
 
 `render.yaml` is a blueprint: **New -> Blueprint** in Render, point it at this repository, and
@@ -539,9 +574,12 @@ not quietly disappear: the change is rolled back and the response says what woul
 hours to it (extend_day), or swap with one of 'City Palace', 'Lake Pichola'."* Run
 `extend_day` first and the same move succeeds.
 
-**A manual move moves one thing.** `move` and `swap` pin every other stop where it already
-is, so re-planning around a drag re-costs the route and the clock without rearranging four
-days the user never touched.
+**A manual move moves one thing.** `move`, `swap`, `extend_day` and `set_day_start` pin every
+other stop where it already is, so re-planning re-costs the route and the clock without
+rearranging days the user never touched. Extending a day used to re-cluster the whole trip:
+asking for 1.5 more hours on day 2 of a Udaipur plan rearranged all four days and swapped
+three of that day's stops for three others. Now the extra hours buy room -- the same stops
+plus whatever else fits.
 
 **Longer days, in both directions.** `extra_day_hours` raises a day's budget and, with it,
 the stop cap -- one more stop per `EXTRA_HOURS_PER_STOP` (2h). Validation allows the longer
@@ -554,9 +592,26 @@ stops than it had, is undone and explained. Trading two stops for three is a bet
 is allowed; losing one quietly is not. Changing the *shape* of the trip -- the pace, the city
 split, a day's length -- is exempt, because changing what fits is the point.
 
-**Your own plans are time on the clock.** A custom activity has no coordinates, so it costs
-no travel -- it is simply time the day owes to something, counted in
-`schedule.totals.your_own_plans` and never against the sightseeing pace.
+**Your own plans are time on the clock, at any hour and any length.** A custom activity has
+no coordinates, so it costs no travel -- it is time the day owes to something, counted in
+`schedule.totals.your_own_plans`. It goes where it was asked for:
+
+* **Any hour.** 06:00 makes the day start at 06:00; 21:30 runs the day past midnight, printed
+  as `00:27 (+1)` rather than the nonsense `24:27`.
+* **Any length,** up to a full day. Twelve hours from 08:00 means that day holds no
+  sightseeing at all, because the hours were already spoken for.
+* **In its place, not at the end.** A 13:00 lunch of your own lands at 13:00 rather than
+  after the fort that finishes at 14:42 -- the day is laid out around it.
+* **Only what it really costs.** Hours outside the sightseeing window are free: dinner at
+  21:30 does not push a temple off the morning, because the temple was closed by then
+  anyway. Only the overlap with 09:00-20:00 is taken from the day's budget.
+* **It is never refused.** Booking three hours legitimately changes what else fits, so the
+  usual "no customisation may shrink the trip" rule does not apply here -- what the engine
+  owes the traveller instead is to say what moved: *"'Long lunch' added to day 1.
+  'Nathdwara' no longer fits that day."*
+
+A day running late because of something you added is a note, not a warning. It was your
+choice.
 
 ## Suggestions, not just complaints
 
@@ -678,6 +733,35 @@ curl -X POST http://127.0.0.1:8000/itinerary/adjust   -H "Content-Type: applicat
 Each edit comes back in `edits[]` with `applied`, `placed_on_day`, a plain-English
 `message` and, when it failed, `suggestions`.
 
+## The screen, for the person building the trip
+
+Everything used to be on one page: the plan, the day budgets, the drag handles, replace and
+remove buttons, suggestions, validation. Neither job was easy -- reading the trip the way a
+customer will, or changing it.
+
+The plan now opens on four tabs:
+
+| Tab | What is on it |
+| --- | --- |
+| **Itinerary** | The trip as the customer reads it: times, stops, a line about each. No controls. |
+| **Customise** | The day split between cities, the pace, per-day length and start, drag and swap. |
+| **Suggestions** | What could be improved, each a single click, plus anything held back. |
+| **Add sights** | What is not in the plan, searchable. |
+
+The form collapses once there is a plan, leaving a one-line summary and a **Change trip**
+button. The open tab survives a rebuild, so an agent who edits on Customise is still looking
+at it when the new plan arrives.
+
+A day is drawn by one function in two modes, so the reading view and the editing view cannot
+drift apart, and a test asserts the reading view carries no editing controls -- the failure
+mode being guarded against is a future control quietly reappearing in the customer's view.
+
+**The look.** A slim masthead rather than a tall gradient banner: the trip is the subject of
+the page, not the product name. One type scale, one button system with a visible
+`:focus-visible` ring on everything reachable by keyboard, tabular figures for every time and
+count, and a coloured rail down each day instead of a heavier border. Colours are design
+tokens with a dark-mode set, so a change is made once.
+
 ## The printed itinerary
 
 Printing produces a separate customer-facing document, built from the plan -- not the app with
@@ -731,7 +815,7 @@ already in the workbook. On `sample_dataset_v4_clean.xlsx` it reports 69 finding
 python -m pytest tests -q
 ```
 
-285 tests: dataset loading and month parsing, clustering determinism, pace and distance caps
+302 tests: dataset loading and month parsing, clustering determinism, pace and distance caps
 on real plans, seasonal filtering, day-allocation fairness, the API endpoints, travel
 realism (missing route data, overnight legs, travel-only days), departure-day reservations,
 hotel-night consistency, the Goa December and June/September cases, fault injection
@@ -770,7 +854,7 @@ engine does not model), and the public API (the envelope, a key being required, 
 closed when none is configured, every input validated, the three shapes `destination`
 accepts, unused inputs reported rather than ignored, traveller type provably not changing
 the plan while pace does, the cache keying on everything that matters, `/docs` advertising
-the key, and the UI endpoints keeping their own response shapes).
+the key, and the UI endpoints keeping their own response shapes), and the screen layout (the four tabs, the reading view carrying no editing controls, the open tab surviving a rebuild, and the form collapsing with a way back to it), and the latest round (extending a day leaving every other day untouched while still buying stops, an activity landing at the hour it was asked for across five placements from 06:00 to a full 24 hours, activities outside sightseeing hours costing no sightseeing, a whole-day commitment leaving no room for sights, a late finish being a note rather than a warning, and times past midnight printing as such).
 
 ## Layout
 
@@ -778,6 +862,7 @@ the key, and the UI endpoints keeping their own response shapes).
 app/
   config.py         tunable rules and thresholds
   api_v1.py         the public REST facade: envelope, API key, frozen vocabulary
+  plancache.py      remembers plans, so editing does not re-plan what it just planned
   customize.py      post-generation operations (move, swap, extend, reallocate, ...)
   lookup.py         typo-tolerant search over the dataset, and what to suggest
   suggest.py        what to do about a plan, as actions rather than complaints

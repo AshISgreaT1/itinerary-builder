@@ -9,6 +9,7 @@ import pandas as pd
 
 import math
 import re
+from functools import lru_cache
 
 from .config import (
     HILL_ALTITUDE_M,
@@ -298,12 +299,26 @@ def order_by_route(sights: pd.DataFrame, start_lat: float, start_lon: float) -> 
     Returns positional indices into ``sights``. Deterministic: ties break on the row order,
     which is already the dataset's priority order.
     """
-    count = len(sights)
-    if count <= 2:
-        return list(range(count))
+    points = tuple(zip(sights["lat"].astype(float), sights["lon"].astype(float)))
+    return list(route_order(points, start_lat, start_lon))
 
-    lats = sights["lat"].to_numpy(dtype=float)
-    lons = sights["lon"].to_numpy(dtype=float)
+
+@lru_cache(maxsize=8192)
+def route_order(points: tuple[tuple[float, float], ...],
+                start_lat: float, start_lon: float) -> tuple[int, ...]:
+    """The same routing, over plain coordinates, remembered.
+
+    The packer routes the same handful of stops again and again -- once per candidate it
+    tries, once more when the grouping is refined, and again on every re-plan -- so this is
+    worth caching. Coordinates rather than a DataFrame both make the key hashable and keep
+    pandas out of a loop that runs thousands of times a plan.
+    """
+    count = len(points)
+    if count <= 2:
+        return tuple(range(count))
+
+    lats = [point[0] for point in points]
+    lons = [point[1] for point in points]
     distances = [[road_km(lats[i], lons[i], lats[j], lons[j]) for j in range(count)] for i in range(count)]
     from_start = [road_km(start_lat, start_lon, lats[i], lons[i]) for i in range(count)]
 
@@ -328,4 +343,4 @@ def order_by_route(sights: pd.DataFrame, start_lat: float, start_lon: float) -> 
                 candidate = order[:i] + order[i : j + 1][::-1] + order[j + 1 :]
                 if tour_length(candidate) + 1e-9 < tour_length(order):
                     order, improved = candidate, True
-    return order
+    return tuple(order)
