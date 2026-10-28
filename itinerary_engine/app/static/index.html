@@ -172,6 +172,24 @@
   .panel { display: none; }
   .panel.on { display: block; }
   .panel-hint { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+  .who { display: grid; grid-template-columns: 220px 1fr; gap: 14px; margin-top: 14px;
+         align-items: start; }
+  .who .hint { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--muted); }
+  .interests-field .chips { margin-top: 0; }
+  .explore { margin: 10px 18px 16px; padding: 12px 14px; border: 1px dashed var(--line);
+             border-radius: var(--radius); background: var(--line-soft); }
+  .explore-head { font-size: 12px; font-weight: 650; text-transform: uppercase;
+                  letter-spacing: .05em; color: var(--muted); margin-bottom: 8px; }
+  .explore-note { text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .free-pill { display: inline-block; margin: 0 6px 8px 0; padding: 3px 9px; border-radius: 999px;
+               background: var(--panel); border: 1px solid var(--line); font-size: 12px;
+               color: var(--muted); }
+  .explore-list { display: flex; flex-direction: column; gap: 8px; }
+  .explore-item { display: flex; justify-content: space-between; align-items: center; gap: 12px;
+                  padding: 9px 11px; background: var(--panel); border: 1px solid var(--line);
+                  border-radius: 10px; }
+  .explore-why { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .explore-cost { font-size: 12px; color: var(--muted); margin-top: 2px; }
   .view-day .v-row { display: grid; grid-template-columns: 112px 1fr; gap: 14px;
                      padding: 11px 18px; border-top: 1px solid var(--line-soft); }
   .view-day .v-row:first-of-type { border-top: none; }
@@ -329,6 +347,24 @@
     </div>
     <div class="chips" id="selected" aria-label="Selected cities"></div>
     <div class="chips" id="suggestions"></div>
+    <div class="who">
+      <div>
+        <label for="group">Who is travelling</label>
+        <select id="group">
+          <option value="">— not said —</option>
+          <option value="solo">Solo</option>
+          <option value="couple">Couple</option>
+          <option value="friends">Friends</option>
+          <option value="family">Family</option>
+        </select>
+      </div>
+      <div class="interests-field">
+        <label>Interests <span class="hint">pick any — used to choose between equally good sights</span></label>
+        <div class="chips" id="interests">
+          ${""}
+        </div>
+      </div>
+    </div>
     <div class="row">
       <button class="primary" id="go" type="submit">Generate itinerary</button>
       <button class="ghost" id="print" type="button">Print</button>
@@ -361,6 +397,7 @@ const prettyLabel = (label) => {
 
 async function loadCities() {
   // Destinations must have sightseeing rows; an origin only needs to exist (e.g. Delhi).
+  fetch("/preferences/options").then((r) => r.json()).then(renderInterests).catch(() => {});
   const [withSights, everyCity] = await Promise.all([
     fetch("/cities").then((r) => r.json()),
     fetch("/cities?with_sights_only=false").then((r) => r.json()),
@@ -411,6 +448,8 @@ $("form").addEventListener("submit", async (event) => {
     pace: $("pace").value,
     origin_city: $("origin").value || null,
     start_month: $("month").value ? Number($("month").value) : null,
+    group_type: $("group").value || null,
+    interests: chosenInterests,
   };
   lastRequest = body; edits = [];
   try {
@@ -496,7 +535,38 @@ function dayView(day) {
           stops ? ` · ${stops} stop${stops === 1 ? "" : "s"}` : ""}</div>
       </header>
       ${rows || `<p class="empty">${esc((day.notes || [])[0] || "A free day.")}</p>`}
+      ${exploreBlock(day)}
     </section>`;
+}
+
+// Optional activities sit visibly apart from the plan: the customer has not chosen them,
+// they are not scheduled, and nothing about the day's hours counts them.
+function exploreBlock(day) {
+  const options = day.explore_on_your_own || [];
+  const windows = day.free_windows || [];
+  if (!options.length && !windows.length) return "";
+  const free = windows.map((w) =>
+    `<span class="free-pill">${esc(w.starts)}–${esc(w.ends)} · ${hours(w.hours)} free</span>`).join("");
+  if (!options.length) {
+    return `<div class="explore"><div class="explore-head">Free time</div>${free}</div>`;
+  }
+  return `<div class="explore">
+      <div class="explore-head">Explore on your own <span class="explore-note">optional · not in the
+        itinerary or its price unless you add it</span></div>
+      ${free}
+      <div class="explore-list">${options.map((o) => `
+        <div class="explore-item">
+          <div>
+            <b>${esc(o.sight)}</b>
+            <span class="tag">${esc(o.category || o.visit_type)}</span>
+            <div class="explore-why">${esc(o.why || "near your free time that day")}</div>
+            <div class="explore-cost">${hours(o.duration_hours)} there, ${hours(o.travel_hours)} travel
+              · fits your ${hours(o.window_hours)} window · ${esc(o.price_note)}</div>
+          </div>
+          <button class="mini" data-take="${esc(o.sight)}" data-take-day="${day.day}"
+            data-city="${esc(o.city)}">Add to itinerary</button>
+        </div>`).join("")}</div>
+    </div>`;
 }
 
 // A day is drawn twice: once as the customer will read it, once with everything an agent
@@ -889,6 +959,15 @@ document.addEventListener("click", (event) => {
   if (event.target.closest("#change-trip")) { openForm(); return; }
   if (event.target.closest("#print-2")) { $("print").click(); return; }
 
+  const take = event.target.closest("[data-take]");
+  if (take) {
+    // An optional activity the customer chooses becomes an ordinary stop: the day is
+    // lengthened to hold it rather than the request being refused.
+    runOperations([{ operation: "pin", sight: take.dataset.take,
+                     city: take.dataset.city, day: Number(take.dataset.takeDay) }]);
+    return;
+  }
+
   const tip = event.target.closest("[data-tip]");
   const extend = event.target.closest("[data-extend]");
   const activity = event.target.closest("[data-activity]");
@@ -1136,6 +1215,29 @@ function renderPrint(plan) {
         weather. Sights marked for a particular time of day are placed accordingly.</div>
     </div>`;
 }
+
+// --- who is travelling, and what they came for ------------------------------------------
+// The vocabulary comes from the server so the page cannot offer an interest the planner
+// does not understand.
+let chosenInterests = [];
+
+function renderInterests(options) {
+  const host = $("interests");
+  if (!host || !options?.interests) return;
+  host.innerHTML = options.interests.map((item) =>
+    `<button type="button" class="chip" data-interest="${esc(item.interest)}"
+       aria-pressed="false" title="${esc(item.dataset_categories.join(", "))}">${esc(item.interest)}</button>`
+  ).join("");
+}
+
+document.addEventListener("click", (event) => {
+  const chip = event.target.closest("[data-interest]");
+  if (!chip) return;
+  const name = chip.dataset.interest;
+  const on = chosenInterests.includes(name);
+  chosenInterests = on ? chosenInterests.filter((x) => x !== name) : [...chosenInterests, name];
+  chip.setAttribute("aria-pressed", String(!on));
+});
 
 // --- Adding something to a day ------------------------------------------------------------
 // The dataset is the authority on what exists, so the box searches it rather than taking a

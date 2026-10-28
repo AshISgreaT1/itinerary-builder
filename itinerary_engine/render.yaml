@@ -33,3 +33,8 @@ services:
       # few megabytes; drop it on a very small instance, or set 0 to switch caching off.
       - key: ITINERARY_PLAN_CACHE
         value: "256"
+      # Customer preferences are a JSON file. Render's default filesystem is ephemeral, so
+      # without a disk attached they are lost on redeploy and not shared between instances.
+      # Attach a disk and point this at its mount path to keep them.
+      - key: ITINERARY_CUSTOMERS
+        value: "data/customers.json"

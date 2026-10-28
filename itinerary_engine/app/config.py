@@ -122,6 +122,20 @@ REFINE_PASSES: Final[int] = 2
 #: Zero considers only clear-cut cases and misses re-orderings; too large and every pair of
 #: stops is evaluated against every day, which costs seconds per plan.
 REFINE_MARGIN_KM: Final[float] = 2.0
+
+# --- "Explore on your own": optional activities offered in a day's genuine free time ------
+#: A window shorter than this is a breather, not an opportunity.
+EXPLORE_MIN_WINDOW_HOURS: Final[float] = 1.0
+#: How many optional activities to offer across a day. The brief asks for two to four.
+EXPLORE_MAX_OPTIONS: Final[int] = 4
+#: At most this share of a free window may be spent travelling to the thing and back.
+#: Half an hour each way out of a two-hour evening is already most of it.
+EXPLORE_MAX_TRAVEL_SHARE: Final[float] = 0.5
+
+#: Driving allowance assumed when lengthening a day to fit a sight the customer asked for.
+#: Only a starting guess -- the planner then measures the real route -- but it keeps the
+#: day from being granted exactly the visit length and falling a few minutes short.
+ARRIVAL_ALLOWANCE_HOURS: Final[float] = 0.5
 #: A sight farther than this from its city centre is almost certainly filed under the
 #: wrong city (e.g. "sunset point" sitting 315 km from Jaisalmer).
 WRONG_CITY_KM: Final[float] = 120.0

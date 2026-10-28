@@ -24,11 +24,13 @@ from .config import (
 from .data_loader import Dataset, get_dataset
 from .enroute import EnRouteStop, plan_en_route
 from . import plancache
+from .freetime import attach as attach_free_time
 from .patterns import patterns_for
 from .schedule import SCHEDULE_ASSUMPTIONS, build_day_schedule, clock
 from .geo import (RouteLeg, local_travel_hours, parse_access_distance_km, road_km,
                   road_km_is_measured, transfer_hours_for_distance)
 from .normalization import normalize_key
+from .personalise import score_row
 from .solver import DaySlot, PackedDay, pace_hours, plan_city, sort_by_priority
 from .validation import validate_itinerary
 
@@ -106,6 +108,14 @@ class PlanRequest:
     #: Start times the user chose, by day number: ``{2: "07:30"}``. An early start buys
     #: daylight the pace allowance cannot.
     day_starts: dict[int, str] = field(default_factory=dict)
+    #: Who is travelling: solo, couple, friends or family. Steers which sights are chosen
+    #: between equals and what is offered for free time -- never the pace, which the data
+    #: says it does not predict.
+    group_type: str = ""
+    #: What they came for, in the vocabulary of ``app.personalise``.
+    interests: list[str] = field(default_factory=list)
+    #: Whose stored preferences these came from, if any.
+    customer_id: str = ""
 
     def pins_for_city(self, city_key: str) -> list[PinnedSight]:
         return [pin for pin in self.pinned_sights if pin.city is None or normalize_key(pin.city) == city_key]
@@ -350,6 +360,13 @@ def _eligible_sights(
     if month:
         eligible = eligible[eligible["open_months_set"].map(lambda months: month in months)]
     eligible = eligible[~eligible["sight_key"].isin(excluded_keys)].reset_index(drop=True)
+    if request is not None and (request.interests or request.group_type):
+        # A score, not a filter: nothing is excluded for not matching, it only wins ties.
+        eligible = eligible.copy()
+        eligible["_preference"] = [
+            score_row(row, request.interests, request.group_type)
+            for _, row in eligible.iterrows()
+        ]
     if pinned_keys:
         eligible["_forced"] = eligible["sight_key"].isin(pinned_keys)
         day_by_key = {normalize_key(pin.sight): pin.day for pin in pins if pin.day is not None}
@@ -461,6 +478,8 @@ def _plan(request: PlanRequest, dataset: Dataset, repair: bool) -> dict:
     }
     if repair:
         payload = _resolve_hard_slots(request, dataset, payload, pace) or payload
+    # Personal extras last, so they cannot influence the plan they describe.
+    attach_free_time(payload, dataset, list(request.interests), request.group_type)
     report = validate_itinerary(payload, dataset, pace, request.start_month)
     payload["validation"] = report.as_dict()
     if not report.passed and repair:

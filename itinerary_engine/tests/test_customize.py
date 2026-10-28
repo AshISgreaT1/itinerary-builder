@@ -505,3 +505,59 @@ def test_past_midnight_is_printed_as_such(dataset):
     assert clock(26.7) == "02:42 (+1)"
     assert clock(23.99) == "23:59"
     assert clock(13.25) == "13:15"
+
+
+# --- adding a sight is a customer request, not a proposal -----------------------------------
+@pytest.mark.parametrize("sight", ["Nahargarh Fort", "Jaigarh Fort", "Albert Hall", "Birla Temple"])
+def test_a_sight_can_be_added_to_any_day_without_a_time_error(dataset, sight):
+    """The day is lengthened to hold it; "it does not fit" is not an answer to a request."""
+    request = PlanRequest(cities=["Jaipur"], duration_days=3, pace="moderate")
+    for day_number in (1, 2, 3):
+        plan, outcomes = apply_operations(
+            dataset, request,
+            [Operation(operation="pin", sight=sight, city="Jaipur", day=day_number)])
+        assert outcomes[0].applied, f"day {day_number}: {outcomes[0].message}"
+        assert day_of(plan, sight) == day_number, outcomes[0].message
+        assert plan["validation"]["passed"], plan["validation"]["issues"]
+
+
+def test_the_day_is_lengthened_by_what_the_sight_really_costs(dataset):
+    """A flat allowance left a sight 23 km out of town an hour and a half short."""
+    request = PlanRequest(cities=["Jaipur"], duration_days=3, pace="moderate")
+    before = build_itinerary(request, dataset)
+    plan, outcomes = apply_operations(
+        dataset, request,
+        [Operation(operation="pin", sight="Chokhi Dhani", city="Jaipur", day=1)])
+    assert outcomes[0].applied, outcomes[0].message
+    assert day_of(plan, "Chokhi Dhani") == 1
+    assert "lengthened" in outcomes[0].message
+    grew = plan["days"][0]["available_hours"] - before["days"][0]["available_hours"]
+    assert grew > 3.0, f"a three-hour show 23 km away needs more than {grew:.1f}h"
+
+
+def test_adding_a_sight_leaves_the_other_days_alone(dataset):
+    request = PlanRequest(cities=["Jaipur"], duration_days=3, pace="moderate")
+    before = build_itinerary(request, dataset)
+    plan, outcomes = apply_operations(
+        dataset, request, [Operation(operation="pin", sight="Albert Hall", city="Jaipur", day=1)])
+    assert outcomes[0].applied
+    for index in (1, 2):  # days 2 and 3
+        assert [s["sight"] for s in plan["days"][index]["sights"]] == \
+               [s["sight"] for s in before["days"][index]["sights"]]
+
+
+def test_a_refusal_names_the_real_obstacle_not_the_clock(dataset):
+    """Two evening sights cannot share a 3.5h evening; that is not a time-limit error."""
+    request = PlanRequest(cities=["Jaipur"], duration_days=3, pace="moderate")
+    results = []
+    for day_number in (1, 2, 3):
+        _, outcomes = apply_operations(
+            dataset, request,
+            [Operation(operation="pin", sight="Chokhi Dhani", city="Jaipur", day=day_number)])
+        results.append(outcomes[0])
+    refused = [outcome for outcome in results if not outcome.applied]
+    assert any(outcome.applied for outcome in results), "it must fit somewhere"
+    for outcome in refused:
+        assert "does not fit" not in outcome.message
+        assert "16:30" in outcome.message or "cannot go on day" in outcome.message
+        assert "Try day" in outcome.message, outcome.message

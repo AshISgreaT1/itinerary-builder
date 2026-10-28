@@ -176,8 +176,14 @@ def sort_by_priority(sights: pd.DataFrame) -> pd.DataFrame:
     A day reserved for a big-ticket sight carries an ``_anchor`` flag, which outranks
     everything else so the day is packed around that sight.
     """
+    # Must-visits first and the tiers untouched: preference sits between the dataset's own
+    # judgement of importance and its priority rank, so it decides between sights the
+    # planner already considers equal and never promotes a minor sight over a major one.
     columns = ["must_visit_flag", "must_see_tier", "priority", "mentions"]
     ascending = [False, True, True, False]
+    if "_preference" in sights.columns:
+        columns.insert(2, "_preference")
+        ascending.insert(2, False)
     if "_anchor" in sights.columns:
         columns, ascending = ["_anchor", *columns], [False, *ascending]
     if "_forced" in sights.columns:  # a sight the user pinned goes in before anything else

@@ -29,7 +29,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 
 from .builder import CustomActivity, PinnedSight, PlanningError, PlanRequest, build_itinerary
+from .config import ARRIVAL_ALLOWANCE_HOURS, SIGHT_BUFFER_HOURS
+from .geo import local_travel_hours, road_km
 from .data_loader import Dataset
+from .edits import find_sight, placement_options
 from .normalization import normalize_key
 
 OPERATIONS = {"retime", "move", "swap", "swap_days", "reorder", "to_morning", "extend_day",
@@ -149,7 +152,14 @@ def apply_operations(
         if problem:
             outcomes.append(OperationOutcome(op.operation, False, problem))
             continue
-        lost = _displaced(payload, rebuilt) if op.operation == "add_activity" else []
+        if op.operation == "pin" and op.sight and _day_of(rebuilt, op.sight) is None:
+            # Room was made and it still did not land, so the obstacle is not the clock.
+            # Rolling back is right -- the day should not keep hours granted for nothing --
+            # but the reason has to be the real one.
+            outcomes.append(OperationOutcome(
+                op.operation, False, _why_it_will_not_fit(dataset, payload, op, current)))
+            continue
+        lost = _displaced(payload, rebuilt) if op.operation in {"add_activity", "pin"} else []
         if lost:
             listed = ", ".join(f"'{name}'" for name in lost[:3])
             message += f" {listed} no longer fit{'s' if len(lost) == 1 else ''} that day."
@@ -173,7 +183,7 @@ def _would_lose_sights(op: Operation, before: dict, after: dict) -> str | None:
     # Adding your own plans legitimately changes what else fits -- that is the whole point
     # of booking three hours for something. Refusing it because a sight no longer fits
     # would be the engine overruling the traveller; what it owes them is to say so.
-    if op.operation in {"drop", "set_pace", "reallocate", "extend_day", "add_activity"}:
+    if op.operation in {"drop", "set_pace", "reallocate", "extend_day", "add_activity", "pin"}:
         return None
     gone = _scheduled(before) - _scheduled(after)
     if not gone:
@@ -199,8 +209,10 @@ def _unmet_intent(op: Operation, payload: dict) -> str | None:
     wanted: list[tuple[str, int | None]] = []
     if op.operation in {"move", "retime"} and op.sight:
         wanted.append((op.sight, op.to_day or op.day))
-    elif op.operation == "pin" and op.sight:
-        wanted.append((op.sight, op.day))
+    elif op.operation == "pin":
+        # Adding a sight is honoured: the day was lengthened to hold it, and anything it
+        # displaced is reported rather than used as a reason to refuse.
+        return None
     elif op.operation == "swap" and op.sight and op.with_sight:
         wanted.append((op.sight, op.with_day or _day_of(payload, op.sight)))
         wanted.append((op.with_sight, op.day or _day_of(payload, op.with_sight)))
@@ -357,7 +369,16 @@ def _apply_one(dataset: Dataset, request: PlanRequest, payload: dict,
         if not op.sight:
             raise PlanningError("pin needs a sight.")
         where = f" on day {op.day}" if op.day else ""
-        return _pin(request, op.sight, op.city, op.day), f"'{op.sight}' added{where}."
+        request = _pin(request, op.sight, op.city, op.day)
+        message = f"'{op.sight}' added{where}."
+        if op.day is not None:
+            # The customer asked for this stop on this day. If the day is full, the day
+            # gets longer -- refusing with "it does not fit" is the engine arguing with a
+            # paying request it is perfectly able to accommodate.
+            request, granted = _make_room(dataset, request, payload, op.sight, op.day)
+            if granted:
+                message += f" Day {op.day} lengthened by {granted:.1f}h to fit it."
+        return request, message
 
     if op.operation == "drop":
         if not op.sight:
@@ -381,6 +402,84 @@ def _apply_one(dataset: Dataset, request: PlanRequest, payload: dict,
     at = f" at {op.at}" if op.at else ""
     return (replace(request, custom_activities=list(request.custom_activities) + [activity]),
             f"'{op.name}' added to day {op.day}{at}.")
+
+
+def _why_it_will_not_fit(dataset: Dataset, payload: dict, op: Operation,
+                         request: PlanRequest) -> str:
+    """The engine's own reason a sight cannot go on a day, in the customer's words."""
+    try:
+        options = placement_options(payload, dataset, op.sight, op.city, request.pace)
+    except PlanningError as error:
+        return f"'{op.sight}' could not be added: {error}"
+    chosen = next((item for item in options["options"] if item["day"] == op.day), None)
+    # Hours are not the obstacle here -- the day was already lengthened -- so the blockers
+    # about hours and stop counts are dropped and the structural one is reported.
+    reasons = [reason for reason in (chosen or {}).get("blockers", [])
+               if "needs" not in reason and "over the" not in reason]
+    if options.get("needs_more_than_a_day"):
+        return options["needs_more_than_a_day"]
+    where = _where_it_would_fit(payload, op)
+    if reasons:
+        return f"'{op.sight}' cannot go on day {op.day}: {reasons[0]}.{where}"
+    return f"'{op.sight}' cannot go on day {op.day} even with the day lengthened.{where}"
+
+
+def _where_it_would_fit(payload: dict, op: Operation) -> str:
+    """Days whose evening is free enough to take this stop instead.
+
+    ``placement_options`` answers for the plan as it stands, where nothing fits because no
+    day has been lengthened yet. What a customer needs is the days worth trying, and for
+    the case that actually comes up -- an evening sight meeting a full evening -- that is
+    the days with room left in theirs.
+    """
+    from .suggest import _evening_room
+
+    sight = next((item for day in payload.get("days", []) for item in day["sights"]
+                  if item["sight"] == op.sight), None)
+    needed = float((sight or {}).get("duration_hours", 1.0)) + SIGHT_BUFFER_HOURS
+    city = next((day.get("city") for day in payload.get("days", []) if day["day"] == op.day), None)
+    elsewhere = [day["day"] for day in payload.get("days", [])
+                 if day["day"] != op.day and day.get("city") == city
+                 and not day.get("is_departure_day") and _evening_room(day) >= needed]
+    if not elsewhere:
+        return ""
+    days = ", ".join(f"day {number}" for number in elsewhere[:3])
+    return f" Try {days} instead."
+
+
+def _make_room(dataset: Dataset, request: PlanRequest, payload: dict,
+               sight: str, day_number: int) -> tuple[PlanRequest, float]:
+    """Lengthen a day enough to hold one more sight, and pin the rest where it is.
+
+    Returns the request and how many hours were granted (0.0 when the day already had
+    room). The day's clock still has to fit before the evening limit, so this buys the
+    budget, not the daylight -- an overrun is reported as a warning the customer can see.
+    """
+    day = next((item for item in payload.get("days", []) if item["day"] == day_number), None)
+    row = find_sight(dataset, sight, day.get("city") if day else None)
+    if day is None or row is None:
+        return request, 0.0
+
+    spare = float(day.get("available_hours", 0.0)) - float(day.get("used_hours", 0.0))
+    # Duration, the usual per-stop buffer, and the real round trip from the city centre.
+    # A flat allowance was not enough for anything out of town: Chokhi Dhani is 23 km from
+    # the middle of Jaipur, so half an hour left the day an hour and a half short.
+    city_row = dataset.city_row(day.get("city", ""))
+    travel = ARRIVAL_ALLOWANCE_HOURS
+    if city_row is not None and row.get("lat") is not None:
+        out_and_back = 2 * road_km(float(city_row["lat"]), float(city_row["lon"]),
+                                   float(row["lat"]), float(row["lon"]))
+        travel = max(travel, local_travel_hours(out_and_back, city_row.get("altitude_m")))
+    needed = float(row.get("duration_hours") or 0.0) + SIGHT_BUFFER_HOURS + travel
+    shortfall = needed - spare
+    if shortfall <= 0:
+        return request, 0.0
+
+    granted = round(shortfall + 0.05, 1)  # a little slack, so it is not a coin toss
+    extra = dict(request.extra_day_hours)
+    extra[day_number] = round(extra.get(day_number, 0.0) + granted, 2)
+    # Freeze the rest: the customer asked for one more stop, not a reshuffled holiday.
+    return _freeze(replace(request, extra_day_hours=extra), payload, {normalize_key(sight)}), granted
 
 
 def _displaced(before: dict, after: dict) -> list[str]:

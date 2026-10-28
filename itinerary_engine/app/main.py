@@ -26,9 +26,12 @@ from .edits import SightEdit, apply_edits, placement_options
 from .data_loader import get_dataset
 from .datacheck import run_checks
 from .models import (ActivitySearchQuery, ActivitySuggestQuery, AdjustRequest, CustomizeRequest,
-                     ItineraryRequest, ItineraryResponse, PlacementQuery, SuggestRequest)
+                     ItineraryRequest, ItineraryResponse, PlacementQuery, PreferencesIn,
+                     SuggestRequest)
 from .lookup import search, suggestions
+from . import preferences
 from .normalization import normalize_key
+from .personalise import INTEREST_CATEGORIES
 from .suggest import suggestions_for
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -78,6 +81,7 @@ app = FastAPI(
         {"name": "planning", "description": "Internal endpoints used by the planner UI."},
         {"name": "catalogue", "description": "What the dataset contains."},
         {"name": "meta", "description": "Health and data quality."},
+        {"name": "customers", "description": "Stored preferences, reused on the next trip."},
     ],
 )
 app.include_router(api_v1_router)
@@ -228,7 +232,21 @@ def _plan_request(request: ItineraryRequest) -> PlanRequest:
             CustomActivity(name=a.name, day=a.day, duration_hours=a.duration_hours, at=a.at, note=a.note)
             for a in request.custom_activities
         ],
+        **_customer_bits(request),
     )
+
+
+def _customer_bits(request: ItineraryRequest) -> dict:
+    """Group type and interests, falling back to what the customer told us last time.
+
+    A request that names a customer but says nothing else gets their stored preferences;
+    anything stated on the request wins, because this trip may not be like the last one.
+    """
+    stored = preferences.get(request.customer_id) if request.customer_id else None
+    group = request.group_type or (stored.group_type if stored else "")
+    interests = list(request.interests) or (list(stored.interests) if stored else [])
+    return {"group_type": group or "", "interests": interests,
+            "customer_id": request.customer_id or ""}
 
 
 @app.get("/data-quality", tags=["meta"])
@@ -247,7 +265,10 @@ def data_quality(kind: str | None = Query(None, description="Only this finding k
 def generate_itinerary(request: ItineraryRequest) -> dict:
     """Generate a day-by-day sight sequence for the given cities, days and pace."""
     try:
-        return build_itinerary(_plan_request(request))
+        payload = build_itinerary(_plan_request(request))
+        if request.customer_id:
+            preferences.record_trip(request.customer_id)
+        return payload
     except PlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except FileNotFoundError as exc:
@@ -271,6 +292,53 @@ def adjust_itinerary(request: AdjustRequest) -> dict:
         return payload
     except PlanningError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/customers/{customer_id}/preferences", tags=["customers"])
+def read_preferences(customer_id: str) -> dict:
+    """What we know about this customer. 404 when they are new."""
+    stored = preferences.get(customer_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail=f"No preferences stored for '{customer_id}'.")
+    return stored.as_dict()
+
+
+@app.put("/customers/{customer_id}/preferences", tags=["customers"])
+def write_preferences(customer_id: str, body: PreferencesIn) -> dict:
+    """Create or update a customer's preferences.
+
+    Unknown interests and group types are dropped rather than stored: a preference the
+    planner cannot act on is worse than none, because it looks like it is doing something.
+    """
+    saved = preferences.update(
+        customer_id,
+        name=body.name or None,
+        group_type=body.group_type,
+        interests=body.interests or None,
+        pace=body.pace,
+        notes=body.notes or None,
+    )
+    return saved.as_dict()
+
+
+@app.get("/customers", tags=["customers"])
+def list_customers() -> dict:
+    """Everyone whose preferences we hold."""
+    return {"customers": preferences.everyone(), "store": str(preferences.STORE_PATH)}
+
+
+@app.get("/preferences/options", tags=["customers"])
+def preference_options() -> dict:
+    """The vocabulary the planner understands, and what each interest covers."""
+    return {
+        "group_types": list(preferences.GROUP_TYPES),
+        "interests": [
+            {"interest": name, "dataset_categories": list(categories)}
+            for name, categories in INTEREST_CATEGORIES.items()
+        ],
+        "note": "Interests map onto the sightseeing sheet's own `category` column; nothing "
+                "here is invented vocabulary.",
+    }
 
 
 @app.post("/itinerary/customize", tags=["planning"])

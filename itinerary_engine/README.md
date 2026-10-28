@@ -231,6 +231,8 @@ dataset load as well as the plan, so allow ten seconds or so for a cold start.
 | POST | `/itinerary/suggestions` | What could be improved, each with the call that would do it |
 | POST | `/itinerary/activity-search` | Find a sight from a partial or misspelt name |
 | POST | `/itinerary/activity-suggestions` | What is worth adding to this trip, unprompted |
+| GET/PUT | `/customers/{id}/preferences` | Read or update a customer's stored preferences |
+| GET | `/preferences/options` | Group types and interests the planner understands |
 | POST | `/itinerary/placement-options` | Which days could hold a sight, and what would have to move |
 | GET | `/cities` | Cities that can be planned, with sight counts |
 | GET | `/cities/{city}/sights` | A city's canonical sights in priority order |
@@ -336,6 +338,109 @@ estimates). Delete the cache file and the engine behaves exactly as it did befor
 itself a data check: 16 coordinates in this dataset sit more than 2 km from any road, and
 the worst -- Leh / Nakeela at 13.3 km -- is rounded to two decimal places in a region where
 that matters. They are reported by `python -m app.datacheck --kind coordinate_far_from_road`.
+
+## Who is travelling, and what they came for
+
+Two questions are asked up front -- the travel group (solo, couple, friends, family) and
+their interests -- and both are answered against the dataset rather than against intuition.
+
+**Interests map onto the sightseeing sheet's own `category` column.** Twelve clean values
+(heritage, religious, nature, adventure, wildlife, market, culture, leisure, waterbody,
+viewpoint, village, transit), so "nature" means `nature + waterbody + wildlife` and nothing
+here is invented vocabulary. `visit_type` has thirty-six values with a long tail and is kept
+for display only.
+
+**Group type earns its place this time.** Measured across 1,689 sight visits in the
+workbook's own agent-written itineraries, it predicts which categories get visited
+(chi-square p < 0.0001):
+
+| group | heritage | religious | nature | adventure | waterbody |
+| --- | --- | --- | --- | --- | --- |
+| family | **41.7%** | 15.9% | 2.6% | 2.6% | 14.6% |
+| couple | 28.6% | 20.1% | **12.2%** | 4.6% | 14.5% |
+| friends | 21.9% | **28.7%** | 13.4% | **8.4%** | 10.9% |
+| solo | 35.1% | 21.6% | 4.1% | 1.4% | 9.5% |
+
+Note what that does *not* say. The same field was measured earlier against how full a day is
+and showed nothing (2.63 stops a day for couples, 2.63 for families, 2.65 for groups, ANOVA
+p=0.87), which is why group type steers *what* is recommended and never the pace. There is a
+test asserting the day's budget is identical across all four group types.
+
+**The effect is a nudge, not a filter.** Preference sits between the dataset's own
+`must_see_tier` and its `priority` rank, so a must-visit stays a must-visit and a minor
+sight is never promoted over a major one -- it only decides between sights the planner
+already considers equal. With nothing stated, every score is zero and plans are identical
+to before the feature existed, which a test checks.
+
+In Jaipur over three days, where more sights compete than fit: a family asking for *cultural*
+gains Albert Hall (heritage); friends asking for *adventure and nature* gain Kanak Vrindavan
+Garden, and in Leh they gain Khardung La.
+
+## Remembering a customer
+
+`app/preferences.py` keeps one record per customer: group type, interests, usual pace, and a
+count of trips planned for them. A request that names a `customer_id` and says nothing else
+gets their stored preferences; anything stated on the request wins, because this trip may not
+be like the last one.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/customers/{id}/preferences` | What we know (404 when new) |
+| PUT | `/customers/{id}/preferences` | Create or update |
+| GET | `/customers` | Everyone on file |
+| GET | `/preferences/options` | The vocabulary, and what each interest covers |
+
+Unknown group types and interests are **dropped rather than stored**: a preference the
+planner cannot act on is worse than none, because it looks like it is doing something.
+
+**This is a JSON file, so it lives where the file lives.** On Render's default filesystem
+that means preferences are lost on redeploy and are not shared between instances. Attach a
+disk and point `ITINERARY_CUSTOMERS` at it, or move it behind a real database -- the module
+has four functions, so swapping the storage is a contained job.
+
+## Free time, and what could fill it
+
+"Free time" only means something once everything else is paid for. The clock already accounts
+for sightseeing, local driving, the intercity leg, lunch, the afternoon break, waiting for an
+evening slot and hotel check-in, so a window in `day.free_windows` is what is genuinely left
+-- not the day's budget minus its sightseeing. Windows come from gaps inside the day and from
+the evening after it; a departure day gets none, because that evening belongs to the journey.
+
+Against those windows the engine offers two to four optional activities per day under
+**Explore on your own**, chosen on four counts: how well the category suits the customer, how
+little of the window the driving eats (never more than half), what is near where they already
+are, and what they are not already seeing.
+
+**They are optional in every sense that matters.** An offer never enters `day["sights"]`,
+never counts towards a day's hours, never reaches the validator's budgets, and never appears
+in the printed plan. Each is checked for the travel there and back inside its own window, so
+an offer is never one the day cannot keep, and nothing is offered twice across a trip.
+
+**They are not priced, and the engine says so rather than guessing.** `entry_fee_inr` is 0.00
+for all 256 rows of the dataset, so every option carries `price: null` and
+`"not priced in this dataset"`. Printing "free" would be a claim the data cannot support.
+
+Taking one is a single click: it becomes an ordinary stop, scheduled and routed like any
+other, and stops being offered.
+
+## Adding a sight is a request, not a proposal
+
+A customer asking for a sight on a particular day used to be told it did not fit. Now the day
+is lengthened by what the sight actually costs -- its visit, the usual buffer, and the real
+round trip from the city centre -- and everything else is pinned where it is, so one addition
+does not rearrange the holiday. Across Jaipur's three days and five sights that is fourteen
+of fifteen placements, against four refusals before.
+
+The measurement matters here: a flat half-hour travel allowance left Chokhi Dhani -- a
+three-hour show 23 km out of town -- an hour and a half short, so the allowance is now the
+measured round trip.
+
+The fifteenth case is refused, and deliberately: day 2 already holds Jal Mahal, and two
+evening sights need 4.1h inside a 3.5h evening window. That is not a time limit the customer
+can overrule without breaking the rule that evening sights are seen in the evening, so the
+engine says exactly that and names the days that work -- *"'Chokhi Dhani' cannot go on day 2:
+'Jal Mahal', 'Chokhi Dhani' need 4.1h inside 16:30-20:00, which is only 3.5h long. Try day 1
+instead."*
 
 ## Grouping nearby stops
 
@@ -815,7 +920,7 @@ already in the workbook. On `sample_dataset_v4_clean.xlsx` it reports 69 finding
 python -m pytest tests -q
 ```
 
-302 tests: dataset loading and month parsing, clustering determinism, pace and distance caps
+342 tests: dataset loading and month parsing, clustering determinism, pace and distance caps
 on real plans, seasonal filtering, day-allocation fairness, the API endpoints, travel
 realism (missing route data, overnight legs, travel-only days), departure-day reservations,
 hotel-night consistency, the Goa December and June/September cases, fault injection
@@ -854,7 +959,7 @@ engine does not model), and the public API (the envelope, a key being required, 
 closed when none is configured, every input validated, the three shapes `destination`
 accepts, unused inputs reported rather than ignored, traveller type provably not changing
 the plan while pace does, the cache keying on everything that matters, `/docs` advertising
-the key, and the UI endpoints keeping their own response shapes), and the screen layout (the four tabs, the reading view carrying no editing controls, the open tab surviving a rebuild, and the form collapsing with a way back to it), and the latest round (extending a day leaving every other day untouched while still buying stops, an activity landing at the hour it was asked for across five placements from 06:00 to a full 24 hours, activities outside sightseeing hours costing no sightseeing, a whole-day commitment leaving no room for sights, a late finish being a note rather than a warning, and times past midnight printing as such).
+the key, and the UI endpoints keeping their own response shapes), and the screen layout (the four tabs, the reading view carrying no editing controls, the open tab surviving a rebuild, and the form collapsing with a way back to it), and the latest round (extending a day leaving every other day untouched while still buying stops, an activity landing at the hour it was asked for across five placements from 06:00 to a full 24 hours, activities outside sightseeing hours costing no sightseeing, a whole-day commitment leaving no room for sights, a late finish being a note rather than a warning, and times past midnight printing as such), and personalisation (the customer store round-tripping and discarding what the planner cannot act on, interests and group leanings naming only real dataset categories, a stated interest outweighing an inferred one, no preferences leaving plans unchanged, must-visits never lost to a preference, group type never moving the day's budget, free windows never overlapping anything committed, optional activities bounded, unique, fitting their window with travel and staying outside every total, and a sight being addable to any day).
 
 ## Layout
 
@@ -865,6 +970,9 @@ app/
   plancache.py      remembers plans, so editing does not re-plan what it just planned
   customize.py      post-generation operations (move, swap, extend, reallocate, ...)
   lookup.py         typo-tolerant search over the dataset, and what to suggest
+  personalise.py    interests and group type, mapped onto dataset categories
+  preferences.py    the customer store (a JSON file; see the caveat above)
+  freetime.py       genuine free windows, and the optional activities for them
   suggest.py        what to do about a plan, as actions rather than complaints
   osrm.py           builds the measured-distance cache (run once, needs OSRM)
   roadcache.py      reads it; the planner never calls the network

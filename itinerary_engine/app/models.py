@@ -62,6 +62,14 @@ class ItineraryRequest(BaseModel):
     #: Start times chosen per day number, e.g. {2: "07:30"}.
     day_starts: dict[int, str] = Field(default_factory=dict)
     custom_activities: list[CustomActivityIn] = []
+    #: Who is travelling. Steers which sights are chosen between equals and what is offered
+    #: for free time; it never changes the pace, which the data says it does not predict.
+    group_type: Literal["solo", "couple", "friends", "family"] | None = None
+    #: What they came for: nature, adventure, religious, cultural, shopping, wildlife,
+    #: scenic, leisure, water. Mapped onto the dataset's own category column.
+    interests: list[str] = []
+    #: Load this customer's stored preferences, and fill in anything not given here.
+    customer_id: str | None = Field(None, max_length=64)
 
     @field_validator("cities")
     @classmethod
@@ -251,6 +259,11 @@ class DayOut(BaseModel):
     schedule: DayScheduleOut | None = None
     #: The same hours as ``schedule.totals``, flattened for the header.
     day_totals: DayTotalsOut | None = None
+    #: Stretches of the day with nothing booked, after sightseeing, travel, meals and rest.
+    free_windows: list[dict] = []
+    #: Optional nearby activities for those windows. Never part of the itinerary: not
+    #: scheduled, not counted in any total, not priced unless the customer takes one.
+    explore_on_your_own: list[dict] = []
     notes: list[str] = []
 
 
@@ -360,3 +373,20 @@ class ActivitySuggestQuery(BaseModel):
     base: ItineraryRequest
     day: int | None = Field(None, ge=1)
     limit: int = Field(12, ge=1, le=40)
+
+
+class PreferencesIn(BaseModel):
+    """Body of ``PUT /customers/{customer_id}/preferences``."""
+
+    name: str = ""
+    group_type: Literal["solo", "couple", "friends", "family"] | None = None
+    interests: list[str] = []
+    pace: Literal["relaxed", "moderate", "active"] | None = None
+    notes: str = ""
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"name": "R. Mehta", "group_type": "family",
+                        "interests": ["cultural", "nature"], "pace": "relaxed"}
+        }
+    }
