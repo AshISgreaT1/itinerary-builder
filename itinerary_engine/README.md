@@ -256,6 +256,9 @@ curl -X POST http://127.0.0.1:8000/itinerary/customize   -H "Content-Type: appli
 (Delhi → Manali is 12 h, so nothing is scheduled), and the month removes seasonal closures
 such as Rohtang Pass in January.
 
+> **Diagrams:** [docs/workflow.md](docs/workflow.md) shows the request pipeline, the
+> planner's stages, where the facts come from, and what happens after a plan exists.
+
 ## How a plan is built
 
 1. **`data_loader.py`** reads the `cities`, `city_distances`, `sightseeing` and
