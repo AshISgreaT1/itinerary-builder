@@ -15,6 +15,7 @@ rows already in the workbook, and the team decides what to apply.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import csv
 import sys
 from dataclasses import asdict, dataclass
@@ -243,6 +244,38 @@ def _name_at(dataset: Dataset, lat: float, lon: float) -> str | None:
     return None
 
 
+def propose_corrections(dataset: Dataset) -> list:
+    """Turn the findings that have a determinable answer into reviewable corrections.
+
+    Only two kinds qualify. A sight sitting far from its city when another city in the same
+    dataset is much closer: the data itself says where it belongs. And the same coordinates
+    filed under two cities: one of the two rows is a copy. Everything else -- a coordinate
+    nowhere near a road, a missing journey time -- needs a map and a person, so it is left
+    in the report rather than guessed at here.
+    """
+    from .corrections import Correction
+
+    proposals: list[Correction] = []
+    for finding in misfiled_sights(dataset):
+        if finding.kind != "far_from_city" or not finding.suggestion.startswith("re-home to "):
+            continue
+        city, _, sight = finding.key.partition(" / ")
+        target = finding.suggestion[len("re-home to "):].split(" (")[0]
+        proposals.append(Correction("rehome", city.strip(), sight.strip(), target.strip(),
+                                    f"{finding.detail}; {finding.suggestion}"))
+
+    for finding in cross_city_duplicates(dataset):
+        if not finding.suggestion.startswith("keep the row under "):
+            continue
+        keep = finding.suggestion[len("keep the row under "):].split(" and ")[0].strip()
+        for half in finding.key.split("  ==  "):
+            city, _, sight = half.partition(" / ")
+            if normalize_key(city.strip()) != normalize_key(keep):
+                proposals.append(Correction("drop", city.strip(), sight.strip(), "",
+                                            f"duplicate of the {keep} row at identical coordinates"))
+    return proposals
+
+
 def run_checks(dataset: Dataset) -> list[Finding]:
     """Every check, worst first."""
     findings = (
@@ -263,7 +296,30 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset", default=None, help="Path to the Excel dataset")
     parser.add_argument("--csv", default=None, help="Write the findings to this CSV")
     parser.add_argument("--kind", default=None, help="Only this finding kind")
+    parser.add_argument("--propose", action="store_true",
+                        help="Write the determinable fixes to data/corrections.csv for review")
     args = parser.parse_args(argv)
+
+    if args.propose:
+        from . import corrections as corrections_module
+        from .corrections import CORRECTIONS_PATH, write
+
+        # Proposals have to be made against the workbook as shipped. Reading the corrected
+        # view instead means the second run sees the problems already fixed, proposes
+        # nothing, and overwrites the reviewed file with an empty one.
+        get_dataset.cache_clear()
+        original, corrections_module.CORRECTIONS_PATH = corrections_module.CORRECTIONS_PATH, Path("corrections-disabled-while-proposing")
+        try:
+            raw = get_dataset(args.dataset)
+            proposals = propose_corrections(raw)
+        finally:
+            corrections_module.CORRECTIONS_PATH = original
+            get_dataset.cache_clear()
+        path = write(proposals, CORRECTIONS_PATH)
+        print(f"{len(proposals)} proposed correction(s) written to {path}.")
+        print("Read them, delete any you disagree with, and commit the file. Nothing is")
+        print("applied until it is in that file.")
+        return 0
 
     findings = run_checks(get_dataset(args.dataset))
     if args.kind:

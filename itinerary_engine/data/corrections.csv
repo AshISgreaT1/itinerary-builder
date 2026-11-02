@@ -1,0 +1,13 @@
+action,city,sight,value,reason
+drop,Leh,Alchi Monastery,,duplicate of the Alchi row at identical coordinates
+drop,Leh,lamayuru monastery,,duplicate of the Lamayuru row at identical coordinates
+drop,Leh,Pangong Lake,,duplicate of the Pangong Lake row at identical coordinates
+drop,Pangong Lake,changla pass,,duplicate of the Leh row at identical coordinates
+rehome,Bikaner,Kheechan village,Manvar,166 km from Bikaner and 34 km from Manvar; no pace reaches it and back in a day
+rehome,Jodhpur,sand dunes around the resort,Manvar,138 km from Jodhpur and 0 km from Manvar
+rehome,Leh,sand dunes,Nubra Valley,125 km from Leh; these are the Nubra dunes and Nubra Valley is the destination people book
+rehome,Leh,Disket monastery,Nubra Valley,115 km from Leh; it sits in Nubra Valley rather than being a Leh day trip
+rehome,Leh,Nakeela,Sarchu,225 km from Leh and 23 km from Sarchu; a pass on the Manali road
+rehome,Leh,Lachangla Pass,Sarchu,252 km from Leh and 9 km from Sarchu; a pass on the Manali road
+rehome,Leh,Skyangchu Thang,Rupsho,164 km from Leh and 39 km from Rupsho
+rehome,Leh,Tsokar Lake,Rupsho,161 km from Leh and 38 km from Rupsho

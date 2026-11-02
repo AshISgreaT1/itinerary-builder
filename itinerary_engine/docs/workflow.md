@@ -14,7 +14,9 @@ flowchart TD
     API["REST API v1<br/><i>app/api_v1.py</i>"] --> REQ
     CLI["Command line<br/><i>app/cli.py</i>"] --> REQ
 
-    REQ["PlanRequest<br/><i>cities, days, pace, preferences</i>"] --> PREF
+    REQ["PlanRequest<br/><i>cities, days, pace, preferences</i>"] --> GUARD
+    GUARD{"Session or API key?<br/><i>app/security.py</i>"} -->|no| DENY["401 / 429"]
+    GUARD -->|yes| PREF
     PREF{"customer_id given?"} -->|yes| LOAD["Load stored preferences<br/><i>app/preferences.py</i>"]
     PREF -->|no| CACHE
     LOAD --> CACHE
@@ -62,10 +64,14 @@ can invent a day the others would reject.
 ```mermaid
 flowchart LR
     XL[("sample_dataset_v4_clean.xlsx")] --> LOADER["app/data_loader.py"]
+    FIX[("data/corrections.csv<br/><i>reviewed by a person</i>")] --> LOADER
     LOADER --> DS["Dataset<br/><i>cities, sights, distances, descriptions</i>"]
 
     XL --> PAT["app/patterns.py<br/><i>1,241 agent-written days</i>"]
     PAT --> ORDER["Visiting order<br/><i>ties inside one time slot</i>"]
+
+    XL --> COMP["app/companions.py<br/><i>194 agent-written packages</i>"]
+    COMP --> PICK["Which cities go together<br/><i>offered in the destination picker</i>"]
 
     OSRM[("road_distances.json<br/>6,285 measured pairs")] --> RC["app/roadcache.py"]
     RC --> GEO["app/geo.py<br/><i>measured, else straight line x 1.3</i>"]
@@ -81,6 +87,12 @@ flowchart LR
 Nothing is invented. A missing journey time is reported as a data gap rather than guessed,
 a distance the router could not measure falls back to the estimate and is counted as one,
 and an unknown sight in a pin is refused rather than dropped.
+
+The workbook is never rewritten. `app/datacheck.py --propose` turns the findings that have a
+determinable answer into lines in `data/corrections.csv`; a person reviews and commits them,
+and the loader applies them before any key, distance or cluster is derived. What cannot be
+determined from the workbook -- a coordinate nowhere near a road, a missing journey time --
+stays in the report.
 
 ## 4. After the plan exists
 

@@ -50,6 +50,42 @@ as `X-API-Key`. **With no keys configured the API returns 503 rather than runnin
 a missing setting must never mean "let everyone in". For local work,
 `ITINERARY_API_ALLOW_ANONYMOUS=1` turns the check off explicitly.
 
+## Who may call what
+
+`/api/v1` was the only guarded surface, so anyone who could reach the server could list
+customers, read their names and preferences, and overwrite them. The rest of the app is now
+guarded too, by three separate things in `app/security.py`:
+
+| Surface | Guard | Why |
+|---|---|---|
+| `/customers`, `/customers/{id}/preferences`, `/data-quality`, `/api/v1/*` | API key (`X-API-Key`) | personal data and the dataset report; a key is a credential a caller can be given and have revoked |
+| `/generate-itinerary`, `/itinerary/*`, `/cities*` | UI session cookie **or** an API key | a browser cannot hold a secret, and a script should not have to pretend to be a browser |
+| the planning endpoints | 30 requests/minute per client | each plan costs about a second of CPU, so an open endpoint is a cheap way to take the service down |
+| `/health` | none | a probe that needs a password is a probe that reports the service as down |
+
+Keys are compared with `hmac.compare_digest`, and **customer data fails closed**: with no
+keys configured the routes answer 503 rather than running open. Customer responses carry
+`Cache-Control: no-store` so nothing in between keeps a copy.
+
+The UI gets a password instead of a key, because a key embedded in a page is a published
+key. `POST /login` checks `ITINERARY_UI_PASSWORD` and sets an HMAC-signed, `httponly`,
+12-hour cookie signed with `ITINERARY_SESSION_SECRET`; forged and expired cookies are
+refused, and the page redirects to `/login` without one. This is the one guard that does
+**not** fail closed -- with no password set there is no way to log in either, so the planner
+stays open and `/health` reports `ui_protected: false` to make that state loud rather than
+silent.
+
+```bash
+ITINERARY_API_KEYS=key-one,key-two   # required for customer data
+ITINERARY_UI_PASSWORD=...            # set it, or the planning UI is open
+ITINERARY_SESSION_SECRET=...         # cookies do not survive a restart without it
+ITINERARY_RATE_LIMIT=30              # 0 disables the limit
+ITINERARY_HTTPS_ONLY=1               # 0 only for local http work
+```
+
+On Render, `render.yaml` generates the password and the session secret. The limiter is
+in-process, so with `WEB_CONCURRENCY` workers the effective limit is per worker.
+
 ### Request
 
 ```bash
@@ -894,6 +930,45 @@ mistake even when the plan underneath is sound; rounding every instant the same 
 row's end exactly the next row's start. Page setup is A4 with 14mm margins and no day split
 across a page break.
 
+## Which cities go together
+
+An agent typing "Leh" is almost never selling Leh alone, and the workbook already knows it:
+41 of the 69 Leh packages in the `itineraries` sheet also sell Pangong Lake. So the picker
+offers the rest of the trip as soon as a destination is searched or chosen.
+
+```bash
+curl "http://127.0.0.1:8000/cities/companions?city=Leh"
+curl "http://127.0.0.1:8000/cities/companions?city=Leh&city=Pangong%20Lake&limit=3"
+```
+
+```json
+{"city": "Nubra Valley", "basis": "sold_together", "trips": 36,
+ "detail": "sold with Leh + Pangong Lake in 36 past itineraries"}
+```
+
+The evidence is the `destination` column ("Leh + Nubra Valley + Pangong Lake") -- the
+agents' own statement of what belongs in one trip. `day_wise_route` is deliberately not
+used: it names the gateway the travellers flew into, so Delhi would end up suggested
+alongside every destination in the workbook on the strength of being driven through.
+
+Three rules keep the suggestions honest:
+
+- **The count is the real combination, not a sum of pairs.** Nubra Valley shares 37
+  itineraries with Leh and 37 with Pangong Lake; reporting 74 for the pair would claim more
+  evidence than the sheet holds, since it only contains 194 usable itineraries. Picking a
+  combination nobody has ever sold (Jaipur + Cochin) falls back to the city chosen last and
+  says which one it is answering for.
+- **Only cities that can be planned are offered.** Agents sell Leh with Shey 16 times, but
+  Shey has no sightseeing rows, so offering it would buy the agent an empty day.
+- **Proximity is a labelled fallback, never a disguise.** The 10 cities that appear in no
+  package, and one-city destinations like Manali, instead get neighbours within 6 hours --
+  but only where `city_distances` actually has a journey time, because a leg without one
+  would fail validation. Goa has neither evidence nor a routable neighbour, so it returns
+  nothing rather than a guess.
+
+In the UI the two kinds are distinguishable: a filled chip with `×41` is past itineraries,
+an outlined chip with `3.5h` is road distance, and hovering either gives the full reason.
+
 ## Dataset quality report
 
 The planner is only as sensible as the rows it reads, so the same rules run against the
@@ -911,11 +986,63 @@ curl http://127.0.0.1:8000/data-quality    # same thing as JSON
 | `cannot_fit_any_day` | visit + driving exceeds the longest possible day, so no trip can ever include it |
 | `no_route_data` | two cities the `itineraries` sheet sells together have no journey time |
 | `road_only_long_haul` | the only route is a drive longer than a travel day |
+| `same_place_two_cities` | the same coordinates filed under two cities, so one row is a copy |
+| `coordinate_far_from_road` | the point is more than 2 km from any road OSRM knows |
 | `sight_named_after_city` | cosmetic: "Pangong Lake / Pangong Lake" |
 
 Nothing is changed and nothing is guessed: every suggestion comes from coordinates and rows
-already in the workbook. On `sample_dataset_v4_clean.xlsx` it reports 69 findings, including
-"Leh / Pangong Lake: 141 km from the Leh centre -> re-home to Pangong Lake (0 km away)".
+already in the workbook. On `sample_dataset_v4_clean.xlsx`, as shipped, it reports 116
+findings -- including "Leh / Pangong Lake: 141 km from the Leh centre -> re-home to Pangong
+Lake (0 km away)".
+
+### Corrections: the engine proposes, a person decides
+
+Those findings were distorting plans rather than just being noted. A sight filed 166 km from
+its city makes the planner offer a day nobody can drive; the same monastery under two cities
+can be scheduled twice. But the workbook is the source of truth and must not be rewritten in
+place, so corrections live in one reviewable file:
+
+```bash
+python -m app.datacheck --propose    # writes data/corrections.csv for review
+```
+
+```
+action,city,sight,value,reason
+rehome,Leh,Disket monastery,Nubra Valley,115 km from Leh; it sits in Nubra Valley
+drop,Leh,Alchi Monastery,,duplicate of the Alchi row at identical coordinates
+```
+
+`--propose` reads the **raw** workbook, never the corrected view, so running it twice gives
+the same answer instead of eroding the reviewed file. It only proposes the two kinds that
+have a determinable answer -- a sight much nearer another city in the same dataset, and the
+same coordinates under two cities. A coordinate nowhere near a road and a missing journey
+time need a map and a person, so they stay in the report rather than being guessed at.
+
+A person then reads the proposals, deletes what they disagree with, and commits the file.
+`data_loader` applies what is in it before any key, distance or cluster is derived, and logs
+one line per correction -- including corrections that match nothing, because a stale file is
+something to be told about rather than a silent no-op. Reverting a decision is deleting a
+row.
+
+Judgement is the point of the review step, and the mechanical "nearest city" answer is often
+wrong. Rohtang Pass is 61 km from Manali and the Jaisalmer dunes 36-50 km from Jaisalmer:
+both stay where they are, because the engine already models them as day trips. Leh's
+Nubra-area sights went to **Nubra Valley**, which appears in 19 of the agents' own
+itineraries, rather than to the nearer hamlets of Hundar and Diskit, which nobody books. Of
+the 45 proposals, 12 were committed.
+
+The shipped `data/corrections.csv` holds 4 duplicate drops and 8 re-homes. Measured effect:
+
+| | as shipped | corrected |
+|---|---|---|
+| findings | 116 | **91** |
+| `cannot_fit_any_day` | 20 | **9** |
+| `same_place_two_cities` | 4 | **0** |
+| sights | 254 | 249 |
+
+The five rows lost are the four duplicates plus one the re-homing revealed: moving Leh's
+"sand dunes" to Nubra Valley put it next to "Hundar sand dunes", and the loader's existing
+de-duplication merged them.
 
 ## Tests
 
@@ -987,15 +1114,18 @@ app/
   builder.py        orchestration, descriptions join, JSON payload
   validation.py     feasibility report
   edits.py          add / replace / remove, placement options, rebuild
-  datacheck.py      dataset quality report (CLI + /data-quality)
+  datacheck.py      dataset quality report (CLI + /data-quality + --propose)
+  corrections.py    reviewed dataset corrections, applied at load
+  security.py       API keys, the UI session cookie, rate limiting
   enroute.py        stops made on the way between two cities
   schedule.py       the clock: blocks, preferred times, lunch and breaks
   patterns.py       ordering habits mined from past itineraries
+  companions.py     which cities the agents sell together, for the destination picker
   models.py         pydantic request/response schemas
   main.py           FastAPI app (also serves the UI)
   static/           the planning UI (single page, no build step)
   cli.py            terminal runner
-data/               the Excel dataset
+data/               the Excel dataset, and corrections.csv (reviewed fixes)
 tests/              pytest suite
 ```
 
@@ -1014,3 +1144,9 @@ tests/              pytest suite
 - The repair pass re-plans at most `MAX_SLOT_REPAIRS` (2) times per plan, so a day with
   three unreachable evening sights may still report one by alternative rather than moving it.
 - Hotels are not selected: every day's local driving is measured from the city centre.
+- 91 data-quality findings remain after the reviewed corrections. 16 coordinates more than
+  2 km from any road and 14 missing journey times cannot be resolved from the workbook
+  itself, so they stay reported rather than guessed; the 43 remaining `far_from_city` rows
+  are day trips the engine already models correctly, or hamlets no customer books.
+- The rate limiter counts requests in the worker's own memory. It is there to stop one
+  client exhausting the service, not as a shared quota across instances.

@@ -38,3 +38,15 @@ services:
       # Attach a disk and point this at its mount path to keep them.
       - key: ITINERARY_CUSTOMERS
         value: "data/customers.json"
+      # The planner UI cannot carry an API key -- a key in a page is a published key -- so
+      # it is protected by a password exchanged for a signed cookie. Without this set, the
+      # planner and its endpoints are open to anyone who can reach the service.
+      - key: ITINERARY_UI_PASSWORD
+        generateValue: true
+      # Signs the session cookies. Set it so sessions survive a redeploy and work across
+      # instances; without it each process invents its own and logs everyone out on restart.
+      - key: ITINERARY_SESSION_SECRET
+        generateValue: true
+      # Requests a minute per client for the planning endpoints, which are CPU-bound.
+      - key: ITINERARY_RATE_LIMIT
+        value: "30"

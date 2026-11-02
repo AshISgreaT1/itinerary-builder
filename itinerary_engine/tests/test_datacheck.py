@@ -10,15 +10,20 @@ from app.main import app
 
 def test_misfiled_sight_is_found_with_a_suggested_home(dataset):
     findings = {finding.key: finding for finding in misfiled_sights(dataset)}
-    pangong = findings.get("Leh / Pangong Lake")
-    assert pangong is not None, "the lake filed under Leh sits 141 km away"
-    assert pangong.severity == "error"
-    assert "Pangong Lake" in pangong.suggestion
+    khardung = findings.get("Nubra Valley / khardung-la-pass")
+    assert khardung is not None, "the pass filed under Nubra Valley sits 100+ km away"
+    assert khardung.severity == "error"
+    assert "re-home to" in khardung.suggestion
+
+    # The lake filed under Leh used to be this test's specimen. data/corrections.csv drops
+    # that row as a duplicate of the Pangong Lake one, so its absence is now the assertion.
+    assert "Leh / Pangong Lake" not in findings
 
 
 def test_sight_that_cannot_fit_any_day_is_reported(dataset):
     keys = {finding.key for finding in unreachable_sights(dataset)}
-    assert "Leh / Pangong Lake" in keys
+    assert "Leh / Tanglang La Pass" in keys, "59 km from the nearest city, no pace reaches it"
+    assert "Leh / Pangong Lake" not in keys, "the reviewed corrections removed that row"
 
 
 def test_every_finding_carries_evidence_and_a_fix(dataset):
@@ -35,8 +40,8 @@ def test_route_gaps_only_cover_pairs_that_are_sold_together(dataset):
     assert len(keys) < 40, "the report must stay actionable, not list every city pair"
 
 
-def test_data_quality_endpoint():
-    response = TestClient(app).get("/data-quality")
+def test_data_quality_endpoint(api_headers):
+    response = TestClient(app).get("/data-quality", headers=api_headers)
     assert response.status_code == 200
     body = response.json()
     assert body["count"] == len(body["findings"]) and body["by_kind"]

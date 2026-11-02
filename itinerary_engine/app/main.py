@@ -14,9 +14,9 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api_v1 import PREFIX as API_V1_PREFIX, API_VERSION, failed, router as api_v1_router
@@ -26,10 +26,10 @@ from .edits import SightEdit, apply_edits, placement_options
 from .data_loader import get_dataset
 from .datacheck import run_checks
 from .models import (ActivitySearchQuery, ActivitySuggestQuery, AdjustRequest, CustomizeRequest,
-                     ItineraryRequest, ItineraryResponse, PlacementQuery, PreferencesIn,
+                     ItineraryRequest, ItineraryResponse, LoginIn, PlacementQuery, PreferencesIn,
                      SuggestRequest)
 from .lookup import search, suggestions
-from . import preferences
+from . import companions, preferences, security
 from .normalization import normalize_key
 from .personalise import INTEREST_CATEGORIES
 from .suggest import suggestions_for
@@ -47,6 +47,8 @@ async def _lifespan(_: FastAPI):
     somebody waits, which is exactly when it is most noticeable. Failures are logged and
     ignored: a warm-up that cannot run must never stop the service from starting.
     """
+    security.warn_if_open()
+
     def warm() -> None:
         try:
             started = time.monotonic()
@@ -85,6 +87,18 @@ app = FastAPI(
     ],
 )
 app.include_router(api_v1_router)
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    """Cheap, standard hardening. Nothing here depends on the app's own logic."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    if request.url.path.startswith(("/customers", "/api/v1")):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
 
 
 # One envelope for the public API, and only for it: the UI endpoints keep the error shape
@@ -134,13 +148,83 @@ async def _unexpected_error(request: Request, exc: Exception) -> JSONResponse:
     )
 
 
+#: Anything holding customer data needs a key. The browser planner cannot carry one, so it
+#: gets a session instead; both are defined in app/security.py.
+CUSTOMER_GUARD = [Depends(security.require_api_key)]
+PLANNER_GUARD = [Depends(security.require_ui_session), Depends(security.limit_planning)]
+BROWSE_GUARD = [Depends(security.require_ui_session)]
+
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+LOGIN_PAGE = """<!doctype html><meta charset="utf-8"><title>Sign in</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+ body{font:15px/1.6 system-ui,sans-serif;background:#f7f8fa;color:#11161d;display:grid;
+      place-items:center;min-height:100vh;margin:0}
+ form{background:#fff;border:1px solid #e6e9ee;border-radius:16px;padding:28px;width:320px}
+ h1{font-size:19px;margin:0 0 4px}p{color:#667085;font-size:13.5px;margin:0 0 18px}
+ input{width:100%;height:40px;padding:0 11px;border:1px solid #e6e9ee;border-radius:9px;
+       font:inherit;box-sizing:border-box}
+ button{width:100%;height:40px;margin-top:12px;border:0;border-radius:9px;background:#1a5fd0;
+        color:#fff;font:inherit;font-weight:600;cursor:pointer}
+ .err{color:#b42318;font-size:13px;margin-top:10px}
+</style>
+<form method="post" action="/login">
+ <h1>Itinerary planner</h1>
+ <p>Sign in to continue.</p>
+ <input id="pw" type="password" placeholder="Password" autofocus required>
+ <button type="submit">Sign in</button>
+ <div class="err" id="err" hidden>That password was not right.</div>
+</form>
+<script>
+document.querySelector("form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const response = await fetch("/login", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({password: document.getElementById("pw").value}),
+  });
+  if (response.ok) { location.href = "/"; return; }
+  document.getElementById("err").hidden = false;
+  document.getElementById("pw").select();
+});
+</script>"""
+
+
+@app.get("/login", include_in_schema=False)
+def login_page() -> HTMLResponse:
+    return HTMLResponse(LOGIN_PAGE)
+
+
+@app.post("/login", include_in_schema=False)
+def sign_in(body: LoginIn) -> JSONResponse:
+    """Exchange the password for a signed, expiring cookie."""
+    if not security.password_matches(body.password):
+        return JSONResponse({"ok": False}, status_code=401)
+    response = JSONResponse({"ok": True})
+    response.set_cookie(
+        security.SESSION_COOKIE, security.issue_session(),
+        max_age=security.SESSION_HOURS * 3600,
+        httponly=True, samesite="lax",
+        secure=os.environ.get("ITINERARY_HTTPS_ONLY", "1").strip().lower() in {"1", "true", "yes"},
+    )
+    return response
+
+
+@app.post("/logout", include_in_schema=False)
+def sign_out() -> JSONResponse:
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(security.SESSION_COOKIE)
+    return response
+
+
 @app.get("/", include_in_schema=False)
-def ui() -> FileResponse:
+def ui(request: Request):
     """The planning UI."""
+    if security.ui_is_protected() and not security.session_is_valid(
+            request.cookies.get(security.SESSION_COOKIE)):
+        return RedirectResponse("/login", status_code=303)
     return FileResponse(STATIC_DIR / "index.html")
 
 
@@ -165,10 +249,12 @@ def health() -> dict:
         "api_version": API_VERSION,
         "uptime_seconds": round(time.time() - STARTED_AT, 1),
         "api_keys_configured": len(configured_keys()),
+        "ui_protected": security.ui_is_protected(),
+        "rate_limit_per_minute": security.PLANNING_PER_MINUTE,
     }
 
 
-@app.get("/cities", tags=["catalogue"])
+@app.get("/cities", tags=["catalogue"], dependencies=BROWSE_GUARD)
 def list_cities(with_sights_only: bool = Query(True, description="Only cities that have sightseeing rows")) -> dict:
     """Cities the engine can plan for."""
     dataset = get_dataset()
@@ -187,7 +273,30 @@ def list_cities(with_sights_only: bool = Query(True, description="Only cities th
     return {"count": len(rows), "cities": sorted(rows, key=lambda r: r["city"])}
 
 
-@app.get("/cities/{city}/sights", tags=["catalogue"])
+@app.get("/cities/companions", tags=["catalogue"], dependencies=BROWSE_GUARD)
+def city_companions(
+    city: list[str] = Query(default=[], description="Cities already chosen, in travel order"),
+    limit: int = Query(6, ge=1, le=20),
+) -> dict:
+    """Cities usually sold with the ones already chosen.
+
+    Declared before ``/cities/{city}/sights`` so the literal path wins the match.
+    """
+    dataset = get_dataset()
+    unknown = [name for name in city if dataset.city_row(name) is None]
+    if unknown:
+        raise HTTPException(status_code=404, detail=f"Unknown city '{unknown[0]}'.")
+    found = companions.suggest(dataset, list(city), limit)
+    pairings = companions.pairings_for(dataset)
+    return {
+        "chosen": list(city),
+        "count": len(found),
+        "itineraries_searched": pairings.trips_seen,
+        "companions": [item.as_dict() for item in found],
+    }
+
+
+@app.get("/cities/{city}/sights", tags=["catalogue"], dependencies=BROWSE_GUARD)
 def city_sights(city: str) -> dict:
     """Canonical sights of one city, in priority order."""
     dataset = get_dataset()
@@ -249,7 +358,7 @@ def _customer_bits(request: ItineraryRequest) -> dict:
             "customer_id": request.customer_id or ""}
 
 
-@app.get("/data-quality", tags=["meta"])
+@app.get("/data-quality", tags=["meta"], dependencies=CUSTOMER_GUARD)
 def data_quality(kind: str | None = Query(None, description="Only this finding kind")) -> dict:
     """Dataset problems that distort itineraries, with the evidence and a suggested fix."""
     findings = [finding.__dict__ for finding in run_checks(get_dataset())]
@@ -261,7 +370,8 @@ def data_quality(kind: str | None = Query(None, description="Only this finding k
     return {"count": len(findings), "by_kind": counts, "findings": findings}
 
 
-@app.post("/generate-itinerary", response_model=ItineraryResponse, tags=["planning"])
+@app.post("/generate-itinerary", response_model=ItineraryResponse, tags=["planning"],
+          dependencies=PLANNER_GUARD)
 def generate_itinerary(request: ItineraryRequest) -> dict:
     """Generate a day-by-day sight sequence for the given cities, days and pace."""
     try:
@@ -275,7 +385,8 @@ def generate_itinerary(request: ItineraryRequest) -> dict:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.post("/itinerary/adjust", response_model=ItineraryResponse, tags=["planning"])
+@app.post("/itinerary/adjust", response_model=ItineraryResponse, tags=["planning"],
+          dependencies=PLANNER_GUARD)
 def adjust_itinerary(request: AdjustRequest) -> dict:
     """Add, replace or remove sights and rebuild the itinerary around the change.
 
@@ -294,7 +405,7 @@ def adjust_itinerary(request: AdjustRequest) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.get("/customers/{customer_id}/preferences", tags=["customers"])
+@app.get("/customers/{customer_id}/preferences", tags=["customers"], dependencies=CUSTOMER_GUARD)
 def read_preferences(customer_id: str) -> dict:
     """What we know about this customer. 404 when they are new."""
     stored = preferences.get(customer_id)
@@ -303,7 +414,7 @@ def read_preferences(customer_id: str) -> dict:
     return stored.as_dict()
 
 
-@app.put("/customers/{customer_id}/preferences", tags=["customers"])
+@app.put("/customers/{customer_id}/preferences", tags=["customers"], dependencies=CUSTOMER_GUARD)
 def write_preferences(customer_id: str, body: PreferencesIn) -> dict:
     """Create or update a customer's preferences.
 
@@ -321,7 +432,7 @@ def write_preferences(customer_id: str, body: PreferencesIn) -> dict:
     return saved.as_dict()
 
 
-@app.get("/customers", tags=["customers"])
+@app.get("/customers", tags=["customers"], dependencies=CUSTOMER_GUARD)
 def list_customers() -> dict:
     """Everyone whose preferences we hold."""
     return {"customers": preferences.everyone(), "store": str(preferences.STORE_PATH)}
@@ -341,7 +452,7 @@ def preference_options() -> dict:
     }
 
 
-@app.post("/itinerary/customize", tags=["planning"])
+@app.post("/itinerary/customize", tags=["planning"], dependencies=PLANNER_GUARD)
 def customize_itinerary(request: CustomizeRequest) -> dict:
     """Change a generated plan: move, swap, reorder, retime, lengthen a day, or add your own.
 
@@ -364,7 +475,7 @@ def customize_itinerary(request: CustomizeRequest) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.post("/itinerary/suggestions", tags=["planning"])
+@app.post("/itinerary/suggestions", tags=["planning"], dependencies=PLANNER_GUARD)
 def itinerary_suggestions(request: SuggestRequest) -> dict:
     """What could be improved about this plan, each with the call that would do it.
 
@@ -379,7 +490,7 @@ def itinerary_suggestions(request: SuggestRequest) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.post("/itinerary/activity-search", tags=["planning"])
+@app.post("/itinerary/activity-search", tags=["planning"], dependencies=BROWSE_GUARD)
 def activity_search(query: ActivitySearchQuery) -> dict:
     """What the user might mean by what they have typed so far.
 
@@ -399,7 +510,7 @@ def activity_search(query: ActivitySearchQuery) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.post("/itinerary/activity-suggestions", tags=["planning"])
+@app.post("/itinerary/activity-suggestions", tags=["planning"], dependencies=PLANNER_GUARD)
 def activity_suggestions(query: ActivitySuggestQuery) -> dict:
     """Things worth adding to this trip, unprompted.
 
@@ -413,7 +524,7 @@ def activity_suggestions(query: ActivitySuggestQuery) -> dict:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.post("/itinerary/placement-options", tags=["planning"])
+@app.post("/itinerary/placement-options", tags=["planning"], dependencies=PLANNER_GUARD)
 def sight_placement_options(query: PlacementQuery) -> dict:
     """Which days could hold this sight, and what would have to move to make room."""
     try:

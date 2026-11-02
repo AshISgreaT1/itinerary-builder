@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 
 from .geo import CityGraph
+from . import corrections
 from .normalization import DeduplicationResult, deduplicate_sights, normalize_key
 
 logger = logging.getLogger(__name__)
@@ -173,10 +174,16 @@ def _clean_distances(frame: pd.DataFrame) -> pd.DataFrame:
     return distances[distances["from_city_key"] != distances["to_city_key"]].reset_index(drop=True)
 
 
-def _clean_sights(frame: pd.DataFrame) -> pd.DataFrame:
+def _clean_sights(frame: pd.DataFrame, cities: pd.DataFrame | None = None) -> pd.DataFrame:
     sights = frame.copy()
     sights["city"] = sights["city"].astype(str)
     sights["sight"] = sights["sight"].astype(str)
+    if cities is not None:
+        # Reviewed corrections are applied before anything is derived from the city, so
+        # keys, distances and clustering all see the corrected home.
+        sights, notes = corrections.apply(sights, cities)
+        for note in notes:
+            logger.info("correction: %s", note)
     sights["city_key"] = sights["city"].map(normalize_key)
     sights["sight_key"] = sights["sight"].map(normalize_key)
     sights["alias_keys"] = _column(sights, "aliases", "").map(_split_aliases)
@@ -225,7 +232,7 @@ def load_dataset(path: str | Path | None = None) -> Dataset:
 
     cities = _clean_cities(_read_sheet(dataset_path, "cities"))
     distances = _clean_distances(_read_sheet(dataset_path, "city_distances"))
-    sights = _clean_sights(_read_sheet(dataset_path, "sightseeing"))
+    sights = _clean_sights(_read_sheet(dataset_path, "sightseeing"), cities)
     descriptions = _clean_descriptions(_read_sheet(dataset_path, "sight_descriptions"))
 
     unknown_cities = sorted(set(sights["city_key"]) - set(cities["city_key"]))

@@ -390,3 +390,9 @@ class PreferencesIn(BaseModel):
                         "interests": ["cultural", "nature"], "pace": "relaxed"}
         }
     }
+
+
+class LoginIn(BaseModel):
+    """Body of ``POST /login``: the planner's password, exchanged for a session cookie."""
+
+    password: str = Field("", max_length=256)

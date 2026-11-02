@@ -68,6 +68,12 @@
     transition: background .12s ease, border-color .12s ease, color .12s ease; }
   .chip:hover { border-color: var(--brand); color: var(--brand); background: var(--brand-soft); }
   .chip[aria-pressed="true"] { background: var(--brand); border-color: var(--brand); color: #fff; }
+  .companions { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
+  .companions .chips { margin-top: 6px; }
+  .companions-label { font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase;
+    color: var(--muted); }
+  .chip-evidence { background: var(--brand-soft); border-color: var(--brand); color: var(--brand); }
+  .chip-count { opacity: .65; font-variant-numeric: tabular-nums; margin-left: 2px; }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 16px; }
   button.primary { background: var(--brand); color: #fff; border: 0; border-radius: 9px;
     height: 40px; padding: 0 20px; font: inherit; font-weight: 600; cursor: pointer;
@@ -347,6 +353,10 @@
     </div>
     <div class="chips" id="selected" aria-label="Selected cities"></div>
     <div class="chips" id="suggestions"></div>
+    <div class="companions" id="companions-field" hidden>
+      <span class="companions-label" id="companions-label"></span>
+      <div class="chips" id="companions" aria-live="polite"></div>
+    </div>
     <div class="who">
       <div>
         <label for="group">Who is travelling</label>
@@ -379,6 +389,22 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+
+// A session lasts twelve hours, so it will expire mid-afternoon for somebody. Every call
+// goes through here, and an expired session sends them to sign in again rather than
+// failing silently with an error nobody can act on.
+async function call(url, options) {
+  const response = await fetch(url, options);
+  if (response.status === 401) {
+    location.href = "/login";
+    throw new Error("signed out");
+  }
+  if (response.status === 429) {
+    const status = $("status");
+    if (status) status.textContent = "Too many requests just now — try again in a moment.";
+  }
+  return response;
+}
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 let cities = [], chosen = [], lastRequest = null, lastPlan = null, edits = [];
 // Customisations are kept on the request, not patched into the plan: every change is a
@@ -399,8 +425,8 @@ async function loadCities() {
   // Destinations must have sightseeing rows; an origin only needs to exist (e.g. Delhi).
   fetch("/preferences/options").then((r) => r.json()).then(renderInterests).catch(() => {});
   const [withSights, everyCity] = await Promise.all([
-    fetch("/cities").then((r) => r.json()),
-    fetch("/cities?with_sights_only=false").then((r) => r.json()),
+    call("/cities").then((r) => r.json()),
+    call("/cities?with_sights_only=false").then((r) => r.json()),
   ]);
   cities = withSights.cities;
   $("origin").insertAdjacentHTML("beforeend",
@@ -408,6 +434,7 @@ async function loadCities() {
   MONTHS.forEach((name, index) =>
     $("month").insertAdjacentHTML("beforeend", `<option value="${index + 1}">${name}</option>`));
   renderSuggestions("");
+  refreshCompanions();
 }
 
 function renderSuggestions(query) {
@@ -420,6 +447,44 @@ function renderSuggestions(query) {
     .join("");
 }
 
+// Which cities the agents actually sell together, read from the past itineraries. The
+// chosen cities drive it; before anything is chosen, an exact search match does, so typing
+// "Leh" offers Pangong Lake without having to add Leh first.
+let companionToken = 0;
+
+function companionAnchor() {
+  if (chosen.length) return chosen;
+  const needle = $("city-search").value.trim().toLowerCase();
+  if (!needle) return [];
+  const exact = cities.filter((c) => c.city.toLowerCase() === needle);
+  const partial = cities.filter((c) => c.city.toLowerCase().startsWith(needle));
+  const match = exact[0] || (partial.length === 1 ? partial[0] : null);
+  return match ? [match.city] : [];
+}
+
+async function refreshCompanions() {
+  const anchor = companionAnchor();
+  const token = ++companionToken;
+  if (!anchor.length) { $("companions-field").hidden = true; return; }
+
+  const query = anchor.map((c) => `city=${encodeURIComponent(c)}`).join("&");
+  let data;
+  try {
+    data = await call(`/cities/companions?${query}&limit=6`).then((r) => r.json());
+  } catch { return; }
+  if (token !== companionToken) return;   // a later keystroke already won
+
+  const found = (data.companions || []).filter((c) => !chosen.includes(c.city));
+  $("companions-field").hidden = !found.length;
+  if (!found.length) return;
+  $("companions-label").textContent = `Usually sold with ${anchor.join(" + ")}`;
+  $("companions").innerHTML = found
+    .map((c) => `<button type="button" class="chip ${c.basis === "nearby" ? "" : "chip-evidence"}"
+      data-add="${esc(c.city)}" title="${esc(c.detail)}">+ ${esc(c.city)}
+      <span class="chip-count">${c.basis === "nearby" ? esc(hours(c.drive_hours)) : "×" + c.trips}</span></button>`)
+    .join("");
+}
+
 function renderChosen() {
   $("selected").innerHTML = chosen
     .map((city, index) => `<button type="button" class="chip" aria-pressed="true" data-remove="${esc(city)}">${index + 1}. ${esc(city)} ✕</button>`)
@@ -428,10 +493,22 @@ function renderChosen() {
 
 document.addEventListener("click", (event) => {
   const add = event.target.closest("[data-add]"), remove = event.target.closest("[data-remove]");
-  if (add) { chosen.push(add.dataset.add); renderChosen(); renderSuggestions($("city-search").value); }
-  if (remove) { chosen = chosen.filter((c) => c !== remove.dataset.remove); renderChosen(); renderSuggestions($("city-search").value); }
+  if (add) {
+    chosen.push(add.dataset.add);
+    $("city-search").value = "";
+    renderChosen(); renderSuggestions(""); refreshCompanions();
+  }
+  if (remove) {
+    chosen = chosen.filter((c) => c !== remove.dataset.remove);
+    renderChosen(); renderSuggestions($("city-search").value); refreshCompanions();
+  }
 });
-$("city-search").addEventListener("input", (event) => renderSuggestions(event.target.value));
+let companionTimer = null;
+$("city-search").addEventListener("input", (event) => {
+  renderSuggestions(event.target.value);
+  clearTimeout(companionTimer);              // one request per pause, not per keystroke
+  companionTimer = setTimeout(refreshCompanions, 180);
+});
 $("print").addEventListener("click", () => {
   if (!lastPlan) { $("status").textContent = "Generate an itinerary first."; return; }
   renderPrint(lastPlan);
@@ -455,7 +532,7 @@ $("form").addEventListener("submit", async (event) => {
   try {
     customisations = [];
     edits = [];
-    const response = await fetch("/generate-itinerary", {
+    const response = await call("/generate-itinerary", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
     const payload = await response.json();
@@ -465,7 +542,7 @@ $("form").addEventListener("submit", async (event) => {
       // /generate-itinerary does not compute suggestions; ask for them so a fresh plan
       // arrives with the same advice a customised one carries.
       closeForm();
-      payload.suggestions = await fetch("/itinerary/suggestions", {
+      payload.suggestions = await call("/itinerary/suggestions", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ base: body }),
       }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
@@ -882,7 +959,7 @@ async function runEdits(newEdits) {
   $("status").textContent = "Recalculating\u2026";
   $("go").disabled = true;
   try {
-    const response = await fetch("/itinerary/adjust", {
+    const response = await call("/itinerary/adjust", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ base: lastRequest, edits }),
     });
@@ -900,7 +977,7 @@ async function runOperations(operations) {
   $("status").textContent = "Recalculating…";
   $("go").disabled = true;
   try {
-    const response = await fetch("/itinerary/customize", {
+    const response = await call("/itinerary/customize", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ base: lastRequest, operations: customisations }),
     });
@@ -918,7 +995,7 @@ async function runOperations(operations) {
 
 async function offerDays(sight, city, host) {
   $("status").textContent = "Checking where it fits\u2026";
-  const response = await fetch("/itinerary/placement-options", {
+  const response = await call("/itinerary/placement-options", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ base: lastRequest, sight, city }),
   });
@@ -1282,7 +1359,7 @@ function openActivityPanel(day, host) {
 
 async function searchActivities(text) {
   if (!text || text.trim().length < 2) { renderActivityMatches([]); return; }
-  const response = await fetch("/itinerary/activity-search", {
+  const response = await call("/itinerary/activity-search", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text, base: lastRequest, limit: 8 }),
   });
@@ -1291,7 +1368,7 @@ async function searchActivities(text) {
 }
 
 async function loadSuggested() {
-  const response = await fetch("/itinerary/activity-suggestions", {
+  const response = await call("/itinerary/activity-suggestions", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ base: lastRequest, day: activityDay, limit: 10 }),
   });

@@ -34,29 +34,26 @@ import time
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, field_validator
 
-from . import plancache
+from . import plancache, security
 from .builder import PlanningError, PlanRequest, build_itinerary
 from .data_loader import get_dataset
 
 API_VERSION = "1.0.0"
 PREFIX = "/api/v1"
-#: Comma-separated keys, e.g. ITINERARY_API_KEYS="live-key-1,live-key-2".
-API_KEYS_ENV = "ITINERARY_API_KEYS"
-#: Set to "1" to run without a key. Local development only -- it is never the default,
-#: because an API that silently accepts anyone when its configuration is missing is worse
-#: than one that refuses to start.
-ALLOW_ANONYMOUS_ENV = "ITINERARY_API_ALLOW_ANONYMOUS"
-
 STARTED_AT = time.time()
 
-api_key_header = APIKeyHeader(
-    name="X-API-Key",
-    auto_error=False,
-    description="Your API key. Set ITINERARY_API_KEYS on the server to issue keys.",
-)
+# Authentication lives in app/security.py so the public API and the customer records cannot
+# drift apart. Re-exported here because callers and tests already import them from this
+# module.
+API_KEYS_ENV = security.API_KEYS_ENV
+ALLOW_ANONYMOUS_ENV = security.ALLOW_ANONYMOUS_ENV
+api_key_header = security.api_key_header
+configured_keys = security.configured_keys
+anonymous_allowed = security.anonymous_allowed
+require_api_key = security.require_api_key
+
 
 router = APIRouter(prefix=PREFIX, tags=["public API v1"])
 
@@ -360,7 +357,8 @@ def info(_: str = Depends(require_api_key)) -> dict:
 
 @router.post("/itinerary", summary="Plan a trip")
 def create_itinerary(body: ItineraryRequestV1, request: Request,
-                     _: str = Depends(require_api_key)) -> dict:
+                     _: str = Depends(require_api_key),
+                     __: None = Depends(security.limit_planning)) -> dict:
     """Plan a trip and return it as JSON.
 
     `destination` and `days` drive the plan; `pace` controls how full each day is. The

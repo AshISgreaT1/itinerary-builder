@@ -268,39 +268,41 @@ def test_taking_an_option_moves_it_into_the_plan(dataset):
 
 
 # --- the API -------------------------------------------------------------------------------------------------
-def test_preference_endpoints(store):
+def test_preference_endpoints(store, api_headers):
     client = TestClient(app)
-    assert client.get("/customers/ghost/preferences").status_code == 404
+    assert client.get("/customers/ghost/preferences", headers=api_headers).status_code == 404
 
     saved = client.put("/customers/c9/preferences",
                        json={"name": "T", "group_type": "friends",
-                             "interests": ["adventure", "nonsense"]})
+                             "interests": ["adventure", "nonsense"]}, headers=api_headers)
     assert saved.status_code == 200
     assert saved.json()["interests"] == ["adventure"]
 
-    assert client.get("/customers/c9/preferences").json()["group_type"] == "friends"
-    assert any(row["customer_id"] == "c9" for row in client.get("/customers").json()["customers"])
+    assert client.get("/customers/c9/preferences", headers=api_headers).json()["group_type"] == "friends"
+    assert any(row["customer_id"] == "c9" for row in client.get("/customers", headers=api_headers).json()["customers"])
 
     options = client.get("/preferences/options").json()
     assert set(options["group_types"]) == set(preferences.GROUP_TYPES)
     assert {item["interest"] for item in options["interests"]} == set(personalise.INTEREST_CATEGORIES)
 
 
-def test_a_plan_reuses_stored_preferences(store):
+def test_a_plan_reuses_stored_preferences(store, api_headers):
     client = TestClient(app)
-    client.put("/customers/c10/preferences", json={"group_type": "family", "interests": ["cultural"]})
+    client.put("/customers/c10/preferences", headers=api_headers,
+               json={"group_type": "family", "interests": ["cultural"]})
     payload = client.post("/generate-itinerary",
                           json={"cities": ["Jaipur"], "duration_days": 3,
                                 "customer_id": "c10"}).json()
     assert payload["summary"]["personalised_for"]["group_type"] == "family"
     assert payload["summary"]["personalised_for"]["interests"] == ["cultural"]
-    assert client.get("/customers/c10/preferences").json()["trips"] >= 1
+    assert client.get("/customers/c10/preferences", headers=api_headers).json()["trips"] >= 1
 
 
-def test_the_request_wins_over_what_was_stored(store):
+def test_the_request_wins_over_what_was_stored(store, api_headers):
     """This trip may not be like the last one."""
     client = TestClient(app)
-    client.put("/customers/c11/preferences", json={"group_type": "family", "interests": ["cultural"]})
+    client.put("/customers/c11/preferences", headers=api_headers,
+               json={"group_type": "family", "interests": ["cultural"]})
     payload = client.post("/generate-itinerary",
                           json={"cities": ["Jaipur"], "duration_days": 3, "customer_id": "c11",
                                 "group_type": "friends", "interests": ["adventure"]}).json()

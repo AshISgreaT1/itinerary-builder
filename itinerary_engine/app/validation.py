@@ -585,7 +585,12 @@ def _check_duplicates_and_logic(payload: dict, dataset: Dataset, report: Validat
             seen.append((city_key, key, float(sight["lat"]), float(sight["lon"]), number))
 
             row = _sight_row(dataset, city_key, sight["sight"])
-            if row is not None and row["city_key"] != city_key:
+            # An en-route stop is chosen precisely because no city on the trip can host it:
+            # Chang La is a Leh row visited on the drive to Pangong Lake. Its home city
+            # differing from the day's is the point, and _en_route_hours already checks it
+            # really does sit on the leg. (Until the duplicate Chang La row under Pangong
+            # Lake was removed, this rule happened to find a same-city row and stayed quiet.)
+            if row is not None and row["city_key"] != city_key and not sight.get("en_route"):
                 report.critical(
                     "destination_and_logic",
                     f"Day {number}: '{sight['sight']}' belongs to {row['city']}, not {city}.",

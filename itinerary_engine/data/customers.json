@@ -1,4 +1,14 @@
 {
+ "c1": {
+  "customer_id": "c1",
+  "group_type": "family",
+  "interests": [],
+  "name": "R. Mehta",
+  "notes": "",
+  "pace": "",
+  "trips": 0,
+  "updated_at": "2026-11-02T10:42:02+00:00"
+ },
  "c10": {
   "customer_id": "c10",
   "group_type": "family",
@@ -8,8 +18,8 @@
   "name": "",
   "notes": "",
   "pace": "",
-  "trips": 4,
-  "updated_at": "2026-10-28T09:38:38+00:00"
+  "trips": 11,
+  "updated_at": "2026-11-02T10:41:40+00:00"
  },
  "c11": {
   "customer_id": "c11",
@@ -20,8 +30,8 @@
   "name": "",
   "notes": "",
   "pace": "",
-  "trips": 4,
-  "updated_at": "2026-10-28T09:38:39+00:00"
+  "trips": 11,
+  "updated_at": "2026-11-02T10:41:41+00:00"
  },
  "c9": {
   "customer_id": "c9",
@@ -33,6 +43,6 @@
   "notes": "",
   "pace": "",
   "trips": 0,
-  "updated_at": "2026-10-28T09:38:38+00:00"
+  "updated_at": "2026-11-02T10:41:40+00:00"
  }
 }

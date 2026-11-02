@@ -34,3 +34,30 @@ def _isolate_plan_cache():
     plancache.clear()
     yield
     plancache.clear()
+
+
+TEST_API_KEY = "test-suite-key"
+
+
+@pytest.fixture(autouse=True)
+def _security_defaults(monkeypatch):
+    """Give every test a known key and a fresh rate-limit window.
+
+    The limiter is per process and keyed by client, so without this one test exhausts the
+    window for the next and the failures land somewhere unrelated. Tests that care about
+    the unconfigured case override these afterwards, which works because an autouse fixture
+    runs first.
+    """
+    from app import security
+
+    monkeypatch.setenv(security.API_KEYS_ENV, TEST_API_KEY)
+    monkeypatch.delenv(security.UI_PASSWORD_ENV, raising=False)
+    security.reset_rate_limit()
+    yield
+    security.reset_rate_limit()
+
+
+@pytest.fixture
+def api_headers():
+    """Headers for an endpoint that holds customer data or dataset internals."""
+    return {"X-API-Key": TEST_API_KEY}
